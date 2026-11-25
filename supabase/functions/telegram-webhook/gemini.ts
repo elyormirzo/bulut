@@ -6,9 +6,12 @@ import { encodeBase64 } from "jsr:@std/encoding@1.0.10/base64";
 const KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
 const BASE = "https://generativelanguage.googleapis.com";
 const INLINE_MAX_BYTES = 7 * 1024 * 1024;
+// 500/503 ("high demand") bo'lsa shu modelni qayta urinish oralig'i.
+const RETRY_DELAYS_MS = [2000, 5000];
 
-// Birinchisi ishlamasa (model topilmasa) keyingisi sinab ko'riladi.
-const MODELS = (Deno.env.get("GEMINI_MODELS") ?? "gemini-2.5-flash,gemini-flash-latest")
+// Birinchisi band bo'lsa yoki topilmasa, keyingisi sinab ko'riladi.
+// (Bepul tarifda har bir modelning limiti alohida, shuning uchun 429 da ham keyingisiga o'tamiz.)
+const MODELS = (Deno.env.get("GEMINI_MODELS") ?? "gemini-2.5-flash,gemini-flash-latest,gemini-2.5-flash-lite")
   .split(",").map((s) => s.trim()).filter(Boolean);
 
 export const NO_SPEECH = "[[NO_SPEECH]]";
@@ -47,14 +50,17 @@ export async function transcribe(bytes: Uint8Array, mimeType: string, isVideo: b
     const parts = [media, { text: PROMPT }];
 
     let lastErr: unknown;
+    let anyBusy = false;
     for (const model of MODELS) {
       try {
         return { text: await generate(model, parts, isVideo), model };
       } catch (e) {
-        if (e instanceof ModelNotFound) { lastErr = e; continue; }
+        if (e instanceof BusyError) { anyBusy = true; lastErr = e; console.warn(`${model} band:`, String(e).slice(0, 200)); continue; }
+        if (e instanceof ModelNotFound) { lastErr = e; console.warn(`${model} topilmadi`); continue; }
         throw e;
       }
     }
+    if (anyBusy) throw lastErr instanceof BusyError ? lastErr : new BusyError(String(lastErr));
     throw lastErr ?? new Error("Gemini modeli topilmadi");
   } finally {
     if (uploaded) {
@@ -98,8 +104,8 @@ async function generate(model: string, parts: unknown[], isVideo: boolean): Prom
     const errText = await res.text();
     if (res.status === 404) throw new ModelNotFound(`${model}: ${errText.slice(0, 200)}`);
     if (res.status === 429) throw new BusyError(`Gemini 429: ${errText.slice(0, 300)}`);
-    if ((res.status === 500 || res.status === 503) && attempt < 1) {
-      await new Promise((r) => setTimeout(r, 2000));
+    if ((res.status === 500 || res.status === 503) && attempt < RETRY_DELAYS_MS.length) {
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
       continue;
     }
     if (res.status === 500 || res.status === 503) throw new BusyError(`Gemini ${res.status}: ${errText.slice(0, 300)}`);
