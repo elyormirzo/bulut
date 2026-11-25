@@ -60,22 +60,43 @@ const SEGMENTS_SCHEMA = {
   },
 };
 
-const SUMMARY_PROMPT = `Quyida audio/video yozuvning toʻliq matni berilgan. Uning qisqa mazmunini oʻzbek tilida (lotin yozuvida) yoz.
+/**
+ * Qisqa xulosa ko'rsatmasi. Birinchi gap: "Videomaterialda/Audiomaterialda [muallif tomonidan] [kim] faoliyati
+ * tanqid qilingan." Urg'u — tanqid qilingan masalalar va takliflarda; ismlar faqat matnda aytilgani bo'yicha.
+ */
+function summaryPrompt(kind: "video" | "audio"): string {
+  const label = kind === "video" ? "Videomaterialda" : "Audiomaterialda";
+  return `Quyida ${kind === "video" ? "videomaterial" : "audiomaterial"}ning toʻliq matni berilgan. Uning annotatsiyasini (qisqa mazmunini) oʻzbek tilida (lotin yozuvida) yoz. "Asosiy fikr" kabi sarlavha qoʻyma.
+Asosiy urgʻu — materialning salbiy (negativ) qismiga: kim tomonidan, kimning faoliyati va qaysi masalalar tanqid qilingani. Takliflar — ikkinchi darajali, qisqa.
+Xulosa QISQA boʻlsin: jami 600 belgidan oshmasin.
 
 Format (aynan shunday, Markdown belgilarisiz):
-Asosiy fikr: <1–2 gapda yozuv nima haqida>
+${label} <muallif: roli Ism Familiya> tomonidan <Ism Familiya (lavozimi)> faoliyati tanqid qilingan. <1 gap: asosiy tanqid nimada.>
 
-Muhim nuqtalar:
-• <nuqta>
-• <nuqta>
+Tanqid qilingan masalalar:
+• <masala>
+• <masala>
 
-Qoidalar:
-- 3–7 ta nuqta; matn qisqa boʻlsa kamroq. Har bir nuqta bitta qisqa gap.
-- Agar matnda topshiriq, kelishuv, sana, summa yoki ism boʻlsa — ularni albatta kirit.
+Takliflar:
+• <taklif>
+
+Birinchi gap qoidalari:
+- Javobni albatta "${label}" soʻzi bilan boshla.
+- Muallif — gapirayotgan shaxs. U oʻzini tanishtirsa yoki matnda nomi aniq aytilsa: "${label} <roli> <Ism Familiya> tomonidan …" deb yoz (masalan: "${label} bloger Eshmat Toshmatov tomonidan …"). Roli aytilmagan boʻlsa — faqat ism-familiya. Muallif nomaʼlum boʻlsa, "… tomonidan" qismini yozma.
+- Faoliyati tanqid qilingan shaxslarni ism-familiyasi bilan yoz; lavozimi yoki tashkiloti aytilgan boʻlsa, qavs ichida qoʻsh. Bir necha kishi boʻlsa, vergul bilan sanab oʻt. Lavozim egasi nomsiz tanqid qilingan boʻlsa, lavozimni yoz (masalan: "Prezident", "tuman hokimi"). Tashkilot tanqid qilingan boʻlsa: "<tashkilot> faoliyati tanqid qilingan".
+- Aniq shaxs yoki tashkilot tanqid qilinmagan, lekin muammolar tanqid qilingan boʻlsa: "${label} … tomonidan <masalalar> tanqid qilingan."
+- Matnda umuman tanqid boʻlmasa: "${label} … haqida soʻz boradi." deb yoz va "Tanqid qilingan masalalar" oʻrniga "Muhim jihatlar" boʻlimini yoz.
+
+Boshqa qoidalar:
+- Ism-familiya, lavozim va tashkilot nomlarini oʻzingdan toʻqima va tuzatma: faqat matnda aniq aytilganini yoz.
+- "Tanqid qilingan masalalar" — 2–5 band: kamchiliklar, qonunbuzarliklar, salbiy holatlar, eʼtirozlar. Eng jiddiylarini birinchi yoz.
+- "Takliflar" — koʻpi bilan 2 band, faqat matnda aniq taklif yoki talab aytilgan boʻlsa; boʻlmasa bu boʻlimni umuman yozma.
+- Har bir band — bitta qisqa gap (15 soʻzgacha). Umumiy, ijobiy yoki kirish gaplarni yozma.
 - Faqat matnda bor narsani yoz, oʻzingdan qoʻshma. Matn rus yoki boshqa tilda boʻlsa ham xulosani oʻzbekcha yoz.
 
 Matn:
 `;
+}
 
 /** Gemini limiti yoki vaqtincha band — foydalanuvchiga "navbat ko'p" deyiladi. */
 export class BusyError extends Error {}
@@ -123,9 +144,9 @@ export async function transcribe(
 }
 
 /** Tayyor matndan qisqa xulosa (audio qayta yuborilmaydi — tez va arzon). Yengil model birinchi. */
-export function summarize(transcript: string, deadline: number): Promise<Transcript> {
+export function summarize(transcript: string, deadline: number, kind: "video" | "audio"): Promise<Transcript> {
   const models = [...SUMMARY_MODELS, ...MODELS.filter((m) => !SUMMARY_MODELS.includes(m))];
-  return runModels([{ text: SUMMARY_PROMPT + transcript }], false, deadline,
+  return runModels([{ text: summaryPrompt(kind) + transcript }], false, deadline,
     { temperature: 0.2, maxOutputTokens: 2048 }, models, SUMMARY_CALL_MS);
 }
 

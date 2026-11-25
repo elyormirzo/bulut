@@ -321,7 +321,7 @@ async function handleSummary(cb: any, chatId: number, requestId: number) {
     .eq("status", "done")
     .not("transcript", "is", null)
     .or(`sum_status.is.null,sum_status.eq.failed,and(sum_status.eq.processing,sum_at.lt.${staleIso()})`)
-    .select("id, transcript, message_id")
+    .select("id, transcript, message_id, media_type, mime_type")
     .maybeSingle();
   if (error) throw error;
   if (!req) {
@@ -334,7 +334,9 @@ async function handleSummary(cb: any, chatId: number, requestId: number) {
   await keepOtherButton(chatId, cb, cb.data);
   const status = await sendMessage(chatId, T.sumProcessing, req.message_id ?? undefined);
   try {
-    const { text, model } = await summarize(req.transcript, Date.now() + GEMINI_BUDGET_MS);
+    const isVideo = req.media_type === "video" || req.media_type === "video_note" ||
+      (req.mime_type ?? "").startsWith("video/");
+    const { text, model } = await summarize(req.transcript, Date.now() + GEMINI_BUDGET_MS, isVideo ? "video" : "audio");
     await deliver(chatId, status.message_id, req.message_id, `${T.sumHeader}\n\n${text}`, undefined, "xulosa");
     await setSum(requestId, "done");
     console.log(`sum ${requestId}: ${text.length} belgi, ${model}`);
