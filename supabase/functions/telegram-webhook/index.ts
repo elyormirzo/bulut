@@ -21,7 +21,7 @@ import {
   tg,
   webhookSecret,
 } from "./telegram.ts";
-import { BusyError, diagnose, NO_SPEECH, type Script, summarize, transcribe } from "./gemini.ts";
+import { BusyError, diagnose, diagnoseYoutube, NO_SPEECH, type Script, summarize, TimeoutError, transcribe } from "./gemini.ts";
 import { parseSegments, toPlainText, toSrt, toTimestampedText } from "./subtitles.ts";
 
 const DAILY_LIMIT = Number(Deno.env.get("DAILY_LIMIT") ?? 20);
@@ -42,8 +42,9 @@ type Msg = any;
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void };
 
 interface Media {
-  kind: "voice" | "video_note" | "audio" | "video" | "document";
+  kind: "voice" | "video_note" | "audio" | "video" | "document" | "youtube";
   fileId: string;
+  url?: string; // YouTube havolasi (fayl o'rniga)
   fileSize?: number;
   duration?: number;
   mimeType: string;
@@ -57,7 +58,9 @@ Deno.serve(async (req) => {
     return json(await setup());
   }
   if (req.method === "GET" && url.searchParams.has("diag")) {
-    return json(await diagnose(url.searchParams.get("m")?.split(","))); // vaqtinchalik: qaysi Gemini modellari ishlashini ko'rish uchun
+    // vaqtinchalik: qaysi Gemini modellari ishlashini va YouTube o'qilishini ko'rish uchun
+    const yt = url.searchParams.get("yt");
+    return json(yt ? await diagnoseYoutube(yt) : await diagnose(url.searchParams.get("m")?.split(",")));
   }
   if (req.method !== "POST") return new Response("MatnQil — Bulut", { status: 200 });
 
@@ -164,15 +167,17 @@ async function handleMessage(updateId: number, msg: Msg) {
   const script: Script = isScript(start.script) ? start.script : "cyrl";
 
   const deadline = Date.now() + GEMINI_BUDGET_MS;
-  const status = await sendMessage(chatId, T.processing, msg.message_id);
+  const status = await sendMessage(chatId, media.url ? T.processingYt : T.processing, msg.message_id);
   tg("sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => {});
 
   try {
-    const bytes = await downloadFile(media.fileId);
-    if (bytes.length > MAX_DOWNLOAD_BYTES) {
+    const bytes = media.url ? { url: media.url } : await downloadFile(media.fileId);
+    if (bytes instanceof Uint8Array && bytes.length > MAX_DOWNLOAD_BYTES) {
       await editMessage(chatId, status.message_id, T.tooBig((bytes.length / 1024 / 1024).toFixed(1)));
       return await finish(requestId, "failed", { error: "too_big" });
     }
+    // YouTube uchun Telegram file_id yo'q; havolani saqlaymiz.
+    const source = media.url ? { file_id: null, source_url: media.url } : { file_id: media.fileId };
 
     // Asosiy yo'l: vaqt belgili bo'laklar (bitta so'rov) -> [00:15] matn; .srt keyin shu bo'laklardan.
     const first = await transcribe(bytes, media.mimeType, media.isVideo, deadline, "segments", script);
@@ -187,7 +192,7 @@ async function handleMessage(updateId: number, msg: Msg) {
       const plain = toPlainText(segs);
       // Avval saqlaymiz, keyin yuboramiz: tugma bosilganda yozuv tayyor bo'lsin.
       await finish(requestId, "done", {
-        model: first.model, text_length: plain.length, file_id: media.fileId, transcript: plain, segments: segs,
+        model: first.model, text_length: plain.length, ...source, transcript: plain, segments: segs,
       });
       await deliver(chatId, status.message_id, msg.message_id, toTimestampedText(segs), resultKeyboard(requestId, true, script));
       return;
@@ -200,14 +205,26 @@ async function handleMessage(updateId: number, msg: Msg) {
       await editMessage(chatId, status.message_id, T.noSpeech);
       return await finish(requestId, "no_speech", { model });
     }
-    await finish(requestId, "done", { model, text_length: text.length, file_id: media.fileId, transcript: text });
+    await finish(requestId, "done", { model, text_length: text.length, ...source, transcript: text });
     await deliver(chatId, status.message_id, msg.message_id, text, resultKeyboard(requestId, false, script));
   } catch (e) {
     console.error(`request ${requestId}`, e);
     const busy = e instanceof BusyError;
-    await editMessage(chatId, status.message_id, busy ? T.busy : T.failed).catch(() => {});
+    const text = media.url
+      ? (e instanceof TimeoutError ? T.ytTimeout : busy ? T.busy : T.ytFailed)
+      : (busy ? T.busy : T.failed);
+    await editMessage(chatId, status.message_id, text).catch(() => {});
     await finish(requestId, busy ? "quota" : "failed", { error: String(e).slice(0, 1000) });
   }
+}
+
+/** Matn yoki izohdan YouTube havolasini topadi va standart ko'rinishga keltiradi. */
+function youtubeUrl(text: string | undefined): string | null {
+  if (!text) return null;
+  const m = text.match(
+    /(?:https?:\/\/)?(?:www\.|m\.|music\.)?(?:youtube\.com\/(?:watch\?(?:[^\s#]*&)?v=|shorts\/|live\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/,
+  );
+  return m ? `https://www.youtube.com/watch?v=${m[1]}` : null;
 }
 
 /** Matnni yuboradi: kichik bo'lsa xabar(lar), katta bo'lsa .txt fayl. Tugma birinchi xabarga qo'yiladi. */
@@ -410,6 +427,8 @@ function extractMedia(msg: Msg): Media | null {
     return { kind: "video", fileId: msg.video.file_id, fileSize: msg.video.file_size, duration: msg.video.duration,
       mimeType: normalizeMime(msg.video.mime_type ?? "video/mp4"), isVideo: true };
   }
+  const yt = youtubeUrl(msg.text ?? msg.caption);
+  if (yt) return { kind: "youtube", fileId: "", url: yt, mimeType: "video/*", isVideo: true };
   const doc = msg.document;
   if (doc) {
     const mime = normalizeMime(doc.mime_type ?? mimeFromName(doc.file_name ?? ""));

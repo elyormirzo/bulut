@@ -30,14 +30,16 @@ export const T = {
     `🎤 ovozli xabar\n` +
     `⭕ video-doira\n` +
     `🎵 audio fayl (mp3, m4a, ogg, wav…)\n` +
-    `🎬 video fayl\n\n` +
+    `🎬 video fayl\n` +
+    `🔗 YouTube havolasi\n\n` +
     `Men esa uni matn qilib qaytaraman.\n\n` +
     `Cheklovlar: fayl 20 MB gacha, kuniga ${limit} ta so'rov.\n` +
     `Yordam: /help`,
 
   help: (limit: number, maxMin: number) =>
     `ℹ️ Qanday ishlatiladi\n\n` +
-    `1. Ovozli xabar, video-doira, audio yoki video yuboring (boshqa chatdan forward qilsangiz ham bo'ladi).\n` +
+    `1. Ovozli xabar, video-doira, audio yoki video yuboring (boshqa chatdan forward qilsangiz ham bo'ladi) ` +
+    `yoki YouTube havolasini tashlang.\n` +
     `2. Bir necha soniya kuting.\n` +
     `3. Matn shu yerga keladi. Uzun matn .txt fayl bo'lib keladi.\n\n` +
     `Cheklovlar:\n` +
@@ -54,6 +56,15 @@ export const T = {
       : `Yana ${limit - used} ta so'rov qoldi.`),
 
   processing: `⏳ Matnga aylantirilmoqda…`,
+  processingYt: `⏳ YouTube videosi matnga aylantirilmoqda… Uzun video 1–2 daqiqa olishi mumkin.`,
+  ytFailed:
+    `😔 YouTube videosini o'qib bo'lmadi.\n` +
+    `Video ochiq (public) ekanini tekshiring — yopiq, faqat havola orqali ko'rinadigan yoki yoshga cheklangan videolar ishlamaydi.\n` +
+    `(Bu so'rov limitingizdan yechilmadi.)`,
+  ytTimeout:
+    `😔 Video juda uzun yoki hozir navbat ko'p — ajratilgan vaqtga sig'madi.\n` +
+    `Hozircha 15–20 daqiqagacha bo'lgan videolar ishonchli ishlaydi. Birozdan keyin yana urinib ko'ring.\n` +
+    `(Bu so'rov limitingizdan yechilmadi.)`,
 
   tooBig: (mb: string) =>
     `😔 Fayl juda katta (${mb} MB).\n\n` +
@@ -79,7 +90,7 @@ export const T = {
     `(Bu so'rov limitingizdan yechilmadi.)`,
 
   unsupported:
-    `Men ovozli xabar, video-doira, audio va video fayllarni matnga aylantiraman. ` +
+    `Men ovozli xabar, video-doira, audio, video fayllarni va YouTube havolalarini matnga aylantiraman. ` +
     `Shulardan birini yuboring. Yordam: /help`,
 
   longAsFile: `📄 Matn uzun bo'lgani uchun fayl qilib yubordim.`,

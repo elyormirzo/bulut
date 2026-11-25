@@ -17,7 +17,13 @@ Telegram ──webhook──▶ Edge Function `telegram-webhook`
                      Telegram'ga javob (≤ 3 xabar, uzunroq bo'lsa .txt fayl)
 ```
 
-Qabul qilinadi: ovozli xabar, video-doira, audio, video, audio/video hujjat.
+Qabul qilinadi: ovozli xabar, video-doira, audio, video, audio/video hujjat (forward ham) va
+**YouTube havolasi** (Gemini videoni o'zi ochadi — yuklab olish shart emas; ochiq videolar, ~15–20 daqiqagacha).
+
+Yozuv: standart **kirill**, `/yozuv` bilan lotinga o'tkaziladi (`users.script`).
+
+Gemini oqim (SSE) rejimida chaqiriladi: model 30 s ichida javob boshlamasa (osilib qolgan), keyingi
+modelga o'tiladi; 503/429 da ham darhol keyingisiga.
 
 Natija darhol vaqt belgilari bilan keladi (`[00:15] …`, ~20 soniyalik xatboshilar). Gemini'dan bitta
 so'rovda JSON bo'laklar olinadi va `requests.segments` ga saqlanadi; JSON buzuq kelsa — oddiy matn rejimiga o'tiladi.

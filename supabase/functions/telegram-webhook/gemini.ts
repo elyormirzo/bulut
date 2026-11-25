@@ -81,53 +81,58 @@ const SEGMENTS_SCHEMA = {
 const W = {
   cyrl: {
     video: "Видеоматериалда", audio: "Аудиоматериалда", by: "томонидан", activity: "фаолияти танқид қилинган",
-    author: "муаллиф: роли Исм Фамилия", target: "Исм Фамилия (лавозими)", main: "1 гап: асосий танқид нимада",
-    crit: "Танқид қилинган масалалар", props: "Таклифлар", aspects: "Муҳим жиҳатлар", about: "ҳақида сўз боради",
-    issue: "масала", prop: "таклиф", example: "блогер Эшмат Тошматов", president: "Президент", hokim: "туман ҳокими",
-    issues: "масалалар", criticized: "танқид қилинган", tashkilot: "ташкилот", alphabet: "KIRILL",
+    author: "муаллиф: роли Исм Фамилия", target: "Исм Фамилия (лавозими)",
+    also: "Шунингдек, материалда:", closeCrit: "каби ҳолатлар танқид остига олинган.",
+    closeNeutral: "каби масалаларга эътибор қаратилган.", about: "ҳақида сўз боради",
+    b1: "йўлларнинг таъмирланмагани;", b2: "маблағлар мақсадсиз сарфланганлиги;", b3: "иш ҳақи кечиктириб берилаётгани",
+    example: "блогер Эшмат Тошматов", president: "Президент", hokim: "туман ҳокими", tashkilot: "ташкилот",
+    alphabet: "KIRILL",
   },
   latn: {
     video: "Videomaterialda", audio: "Audiomaterialda", by: "tomonidan", activity: "faoliyati tanqid qilingan",
-    author: "muallif: roli Ism Familiya", target: "Ism Familiya (lavozimi)", main: "1 gap: asosiy tanqid nimada",
-    crit: "Tanqid qilingan masalalar", props: "Takliflar", aspects: "Muhim jihatlar", about: "haqida soʻz boradi",
-    issue: "masala", prop: "taklif", example: "bloger Eshmat Toshmatov", president: "Prezident", hokim: "tuman hokimi",
-    issues: "masalalar", criticized: "tanqid qilingan", tashkilot: "tashkilot", alphabet: "LOTIN",
+    author: "muallif: roli Ism Familiya", target: "Ism Familiya (lavozimi)",
+    also: "Shuningdek, materialda:", closeCrit: "kabi holatlar tanqid ostiga olingan.",
+    closeNeutral: "kabi masalalarga eʼtibor qaratilgan.", about: "haqida soʻz boradi",
+    b1: "yoʻllarning taʼmirlanmagani;", b2: "mablagʻlar maqsadsiz sarflanganligi;", b3: "ish haqi kechiktirib berilayotgani",
+    example: "bloger Eshmat Toshmatov", president: "Prezident", hokim: "tuman hokimi", tashkilot: "tashkilot",
+    alphabet: "LOTIN",
   },
 };
 
 /**
- * Annotatsiya ko'rsatmasi. Birinchi gap: "Videomaterialda/Audiomaterialda [muallif tomonidan] [kim] faoliyati
- * tanqid qilingan." Urg'u — salbiy qismga; ismlar faqat matnda aytilgani bo'yicha; qisqa.
+ * Annotatsiya ko'rsatmasi: 1–2 gapli kirish ("Videomaterialda … tomonidan … faoliyati tanqid qilingan. …"),
+ * so'ng "Shuningdek, materialda:" ro'yxati (-magani / -ligi / -ayotgani) va "… kabi holatlar tanqid ostiga olingan."
  */
 function summaryPrompt(kind: "video" | "audio", script: Script): string {
   const w = W[script];
   const label = kind === "video" ? w.video : w.audio;
-  return `Quyida ${kind === "video" ? "videomaterial" : "audiomaterial"}ning toʻliq matni berilgan. Uning annotatsiyasini (qisqa mazmunini) oʻzbek tilida, ${w.alphabet} yozuvida yoz. "Asosiy fikr" kabi sarlavha qoʻyma.
-Asosiy urgʻu — materialning salbiy (negativ) qismiga: kim tomonidan, kimning faoliyati va qaysi masalalar tanqid qilingani. Takliflar — ikkinchi darajali, qisqa.
-Annotatsiya QISQA boʻlsin: jami 600 belgidan oshmasin.
+  return `Quyida ${kind === "video" ? "videomaterial" : "audiomaterial"}ning toʻliq matni berilgan. Uning annotatsiyasini oʻzbek tilida, ${w.alphabet} yozuvida yoz.
+Asosiy urgʻu — materialning salbiy (negativ) qismiga: kim tomonidan, kimning faoliyati va qanday holatlar tanqid qilingani.
+Annotatsiya QISQA boʻlsin: jami 700 belgidan oshmasin. Sarlavha, "Asosiy fikr", "Muhim nuqtalar", "Tanqid qilingan masalalar" kabi boʻlim nomlarini YOZMA.
 
 Format (aynan shunday, Markdown belgilarisiz, ${w.alphabet} yozuvida):
-${label} <${w.author}> ${w.by} <${w.target}> ${w.activity}. <${w.main}.>
+${label} <${w.author}> ${w.by} <${w.target}> ${w.activity}. <Yana 1 gap: material qisqacha nima haqida.>
 
-${w.crit}:
-• <${w.issue}>
-• <${w.issue}>
+${w.also}
+• ${w.b1}
+• ${w.b2}
+• ${w.b3}
+${w.closeCrit}
 
-${w.props}:
-• <${w.prop}>
+Kirish qoidalari (1–2 gap):
+- Javobni albatta "${label}" soʻzi bilan boshla. Kirish materialning qisqa mazmunini ochib bersin.
+- Muallif — gapirayotgan shaxs. U oʻzini tanishtirsa yoki matnda nomi aniq aytilsa: "${label} <roli> <Ism Familiya> ${w.by} …" (masalan: "${label} ${w.example} ${w.by} …"). Roli aytilmagan boʻlsa — faqat ism-familiya. Muallif nomaʼlum boʻlsa, "… ${w.by}" qismini yozma.
+- Faoliyati tanqid qilingan shaxslarni ism-familiyasi bilan yoz; lavozimi yoki tashkiloti aytilgan boʻlsa, qavs ichida qoʻsh. Bir necha kishi boʻlsa, vergul bilan sanab oʻt. Nomsiz lavozim egasi tanqid qilingan boʻlsa, lavozimni yoz (masalan: "${w.president}", "${w.hokim}"). Tashkilot boʻlsa: "<${w.tashkilot}> ${w.activity}".
+- Aniq shaxs yoki tashkilot tanqid qilinmagan boʻlsa, kirishni "${label} … ${w.about}." koʻrinishida yoz.
 
-Birinchi gap qoidalari:
-- Javobni albatta "${label}" soʻzi bilan boshla.
-- Muallif — gapirayotgan shaxs. U oʻzini tanishtirsa yoki matnda nomi aniq aytilsa: "${label} <roli> <Ism Familiya> ${w.by} …" deb yoz (masalan: "${label} ${w.example} ${w.by} …"). Roli aytilmagan boʻlsa — faqat ism-familiya. Muallif nomaʼlum boʻlsa, "… ${w.by}" qismini yozma.
-- Faoliyati tanqid qilingan shaxslarni ism-familiyasi bilan yoz; lavozimi yoki tashkiloti aytilgan boʻlsa, qavs ichida qoʻsh. Bir necha kishi boʻlsa, vergul bilan sanab oʻt. Lavozim egasi nomsiz tanqid qilingan boʻlsa, lavozimni yoz (masalan: "${w.president}", "${w.hokim}"). Tashkilot tanqid qilingan boʻlsa: "<${w.tashkilot}> ${w.activity}".
-- Aniq shaxs yoki tashkilot tanqid qilinmagan, lekin muammolar tanqid qilingan boʻlsa: "${label} … ${w.by} <${w.issues}> ${w.criticized}."
-- Matnda umuman tanqid boʻlmasa: "${label} … ${w.about}." deb yoz va "${w.crit}" oʻrniga "${w.aspects}" boʻlimini yoz.
+Roʻyxat qoidalari ("${w.also}"):
+- 2–6 band. Har bir band — otlashgan qisqa ibora, "-magani", "-mayotgani", "-ganligi", "-ayotgani", "ekanligi" kabi shakllarda tugasin (namunadagidek). Toʻliq gap yozma.
+- Bandlar oxirida nuqtali vergul (;) qoʻy, oxirgi bandda qoʻyma. Eng jiddiy holatlarni birinchi yoz.
+- Roʻyxatdan keyin alohida qatorda: tanqid boʻlsa — "${w.closeCrit}", tanqid boʻlmasa — "${w.closeNeutral}"
+- Agar matnda aniq taklif yoki talab aytilgan boʻlsa, oxirida bitta gap qoʻsh: "… taklif qilingan." / "… talab qilingan." Boʻlmasa yozma.
 
 Boshqa qoidalar:
 - Ism-familiya, lavozim va tashkilot nomlarini oʻzingdan toʻqima va tuzatma: faqat matnda aniq aytilganini yoz (${w.alphabet} yozuviga oʻgirib).
-- "${w.crit}" — 2–5 band: kamchiliklar, qonunbuzarliklar, salbiy holatlar, eʼtirozlar. Eng jiddiylarini birinchi yoz.
-- "${w.props}" — koʻpi bilan 2 band, faqat matnda aniq taklif yoki talab aytilgan boʻlsa; boʻlmasa bu boʻlimni umuman yozma.
-- Har bir band — bitta qisqa gap (15 soʻzgacha). Umumiy, ijobiy yoki kirish gaplarni yozma.
 - Faqat matnda bor narsani yoz, oʻzingdan qoʻshma. Matn rus yoki boshqa tilda boʻlsa ham annotatsiyani oʻzbekcha (${w.alphabet}) yoz.
 
 Matn:
@@ -149,8 +154,11 @@ export interface Transcript {
 
 export type Mode = "text" | "segments";
 
+/** Kirish: fayl baytlari yoki YouTube havolasi (Gemini uni o'zi ochadi). */
+export type MediaInput = Uint8Array | { url: string };
+
 export async function transcribe(
-  bytes: Uint8Array,
+  input: MediaInput,
   mimeType: string,
   isVideo: boolean,
   deadline: number, // Date.now() bo'yicha: shu vaqtgacha javob bo'lmasa, to'xtatamiz
@@ -160,10 +168,12 @@ export async function transcribe(
   let uploaded: { name: string; uri: string } | null = null;
   try {
     let media: Record<string, unknown>;
-    if (bytes.length <= INLINE_MAX_BYTES) {
-      media = { inlineData: { mimeType, data: encodeBase64(bytes) } };
+    if (!(input instanceof Uint8Array)) {
+      media = { fileData: { fileUri: input.url } };
+    } else if (input.length <= INLINE_MAX_BYTES) {
+      media = { inlineData: { mimeType, data: encodeBase64(input) } };
     } else {
-      uploaded = await uploadFile(bytes, mimeType);
+      uploaded = await uploadFile(input, mimeType);
       media = { fileData: { mimeType, fileUri: uploaded.uri } };
     }
     const parts = [media, { text: mode === "segments" ? segmentsPrompt(script) : textPrompt(script) }];
@@ -220,7 +230,11 @@ async function runModels(
   throw lastErr ?? new Error("Gemini modeli topilmadi");
 }
 
+// Model shu vaqt ichida birinchi bo'lakni yubormasa — osilib qolgan deb hisoblab, keyingisiga o'tamiz.
+const FIRST_CHUNK_MS = Number(Deno.env.get("GEMINI_FIRST_CHUNK_MS") ?? 30_000);
+
 /**
+ * Gemini'ni oqim (SSE) rejimida chaqiradi.
  * callDeadline — shu modelga ajratilgan vaqt; tugasa BusyError (keyingi model sinaladi).
  * deadline — umumiy vaqt; tugasa TimeoutError (boshqa urinish yo'q).
  */
@@ -243,53 +257,89 @@ async function generate(
     const left = callDeadline - Date.now();
     if (left < 3_000) throw new BusyError(`${model}: ajratilgan vaqt tugadi`);
     const t0 = Date.now();
-    let res: Response;
+    const ctrl = new AbortController();
+    let why = "";
+    const stop = (reason: string) => { why = reason; ctrl.abort(); };
+    const totalTimer = setTimeout(() => stop("total"), left);
+    let firstTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => stop("first"), Math.min(FIRST_CHUNK_MS, left));
+    const gotFirst = () => { if (firstTimer !== undefined) { clearTimeout(firstTimer); firstTimer = undefined; } };
+
     try {
-      res = await fetch(`${BASE}/v1beta/models/${model}:generateContent`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-goog-api-key": KEY },
-        body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig }),
-        signal: AbortSignal.timeout(left),
-      });
-    } catch (e) {
-      if (e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError")) {
-        const msg = `${model}: ${Math.round((Date.now() - t0) / 1000)} s da javob bermadi`;
-        // Umumiy vaqt ham tugagan bo'lsa — to'xtaymiz; aks holda keyingi modelga o'tamiz.
-        throw deadline - Date.now() < 10_000 ? new TimeoutError(msg) : new BusyError(msg);
+      let res: Response;
+      try {
+        res = await fetch(`${BASE}/v1beta/models/${model}:streamGenerateContent?alt=sse`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-goog-api-key": KEY },
+          body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig }),
+          signal: ctrl.signal,
+        });
+      } catch (e) {
+        throw abortError(e, why, model, t0, deadline);
       }
-      throw e;
-    }
-    console.log(`${model} -> ${res.status} (${Date.now() - t0} ms)`);
 
-    if (res.ok) {
-      const data = await res.json();
-      const cand = data.candidates?.[0];
-      const text = (cand?.content?.parts ?? [])
-        .filter((p: { thought?: boolean }) => !p.thought)
-        .map((p: { text?: string }) => p.text ?? "")
-        .join("")
-        .trim();
-      if (!text) {
-        const reason = data.promptFeedback?.blockReason ?? cand?.finishReason ?? "empty";
-        throw new Error(`Gemini bo'sh javob qaytardi: ${reason}`);
+      if (!res.ok) {
+        gotFirst();
+        const errText = await res.text();
+        console.log(`${model} -> ${res.status} (${Date.now() - t0} ms)`);
+        if (res.status === 400 && generationConfig.thinkingConfig && /thinking/i.test(errText)) {
+          delete generationConfig.thinkingConfig; // bu model bunday sozlamani qo'llamaydi
+          continue;
+        }
+        if (res.status === 404) throw new ModelNotFound(`${model}: ${errText.slice(0, 300)}`);
+        if (res.status === 429) throw new BusyError(`Gemini 429: ${errText.slice(0, 300)}`);
+        if ((res.status === 500 || res.status === 503) && attempt < RETRY_DELAYS_MS.length) {
+          await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+          continue;
+        }
+        if (res.status === 500 || res.status === 503) throw new BusyError(`Gemini ${res.status}: ${errText.slice(0, 300)}`);
+        throw new Error(`Gemini ${res.status}: ${errText.slice(0, 500)}`);
       }
+
+      // SSE: har bir "data: {...}" — javobning navbatdagi bo'lagi.
+      let text = "";
+      let finish = "";
+      let block = "";
+      let buf = "";
+      const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += value;
+          let idx;
+          while ((idx = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, idx).trim();
+            buf = buf.slice(idx + 1);
+            if (!line.startsWith("data:")) continue;
+            gotFirst();
+            const chunk = JSON.parse(line.slice(5));
+            const cand = chunk.candidates?.[0];
+            for (const p of cand?.content?.parts ?? []) if (!p.thought && p.text) text += p.text;
+            if (cand?.finishReason) finish = cand.finishReason;
+            if (chunk.promptFeedback?.blockReason) block = chunk.promptFeedback.blockReason;
+          }
+        }
+      } catch (e) {
+        throw abortError(e, why, model, t0, deadline);
+      }
+      console.log(`${model} -> 200 (${Date.now() - t0} ms, ${text.length} belgi, ${finish || "?"})`);
+      text = text.trim();
+      if (!text) throw new Error(`Gemini bo'sh javob qaytardi: ${block || finish || "empty"}`);
       return text;
+    } finally {
+      clearTimeout(totalTimer);
+      gotFirst();
     }
-
-    const errText = await res.text();
-    if (res.status === 400 && generationConfig.thinkingConfig && /thinking/i.test(errText)) {
-      delete generationConfig.thinkingConfig; // bu model bunday sozlamani qo'llamaydi
-      continue;
-    }
-    if (res.status === 404) throw new ModelNotFound(`${model}: ${errText.slice(0, 300)}`);
-    if (res.status === 429) throw new BusyError(`Gemini 429: ${errText.slice(0, 300)}`);
-    if ((res.status === 500 || res.status === 503) && attempt < RETRY_DELAYS_MS.length) {
-      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
-      continue;
-    }
-    if (res.status === 500 || res.status === 503) throw new BusyError(`Gemini ${res.status}: ${errText.slice(0, 300)}`);
-    throw new Error(`Gemini ${res.status}: ${errText.slice(0, 500)}`);
   }
+}
+
+/** Uzilish sababiga qarab: model osilgan/sekin -> BusyError (keyingi model), umumiy vaqt tugagan -> TimeoutError. */
+function abortError(e: unknown, why: string, model: string, t0: number, deadline: number): Error {
+  if (!why) return e instanceof Error ? e : new Error(String(e));
+  const sec = Math.round((Date.now() - t0) / 1000);
+  const msg = why === "first" ? `${model}: ${sec} s da javob boshlamadi` : `${model}: ${sec} s da tugatmadi`;
+  console.log(msg);
+  return deadline - Date.now() < 10_000 ? new TimeoutError(msg) : new BusyError(msg);
 }
 
 /** Diagnostika: bu kalit bilan ochiq "flash" modellari va har biriga qisqa sinov so'rovi. */
@@ -318,6 +368,18 @@ export async function diagnose(only?: string[]) {
     }
   }
   return { models_list_status: r.status, flash, probes };
+}
+
+/** Diagnostika: YouTube videosini o'qiy olishini tekshirish (vaqtinchalik). */
+export async function diagnoseYoutube(id: string) {
+  if (!/^[A-Za-z0-9_-]{11}$/.test(id)) return { error: "id" };
+  const t0 = Date.now();
+  try {
+    const r = await transcribe({ url: `https://www.youtube.com/watch?v=${id}` }, "video/*", true, Date.now() + 60_000);
+    return { ms: Date.now() - t0, model: r.model, text: r.text.slice(0, 300) };
+  } catch (e) {
+    return { ms: Date.now() - t0, error: String(e).slice(0, 400) };
+  }
 }
 
 async function uploadFile(bytes: Uint8Array, mimeType: string): Promise<{ name: string; uri: string }> {
