@@ -6,8 +6,8 @@ import { encodeBase64 } from "jsr:@std/encoding@1.0.10/base64";
 const KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
 const BASE = "https://generativelanguage.googleapis.com";
 const INLINE_MAX_BYTES = 7 * 1024 * 1024;
-// 500/503 ("high demand") bo'lsa shu modelni qayta urinish oralig'i.
-const RETRY_DELAYS_MS = [2000]; // keyin boshqa modelga o'tamiz
+// 500/503 ("high demand") bo'lsa shu modelni qayta urinmaymiz — darhol keyingi modelga o'tamiz (tezroq).
+const RETRY_DELAYS_MS: number[] = [];
 
 // Birinchisi band bo'lsa yoki topilmasa, keyingisi sinab ko'riladi.
 // (Bepul tarifda har bir modelning limiti alohida, shuning uchun 429 da ham keyingisiga o'tamiz.)

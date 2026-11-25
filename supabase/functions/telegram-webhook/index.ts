@@ -227,6 +227,11 @@ function keepOtherButton(chatId: number, cb: { message?: { message_id: number; r
   }).catch(() => {});
 }
 
+/** "processing" holatida qotib qolgan (server uzib qo'ygan) tugmani 3 daqiqadan keyin qayta bosish mumkin. */
+function staleIso() {
+  return new Date(Date.now() - 3 * 60_000).toISOString();
+}
+
 function stamp() {
   return new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
 }
@@ -248,7 +253,7 @@ async function handleCallback(cb: any) {
     .eq("telegram_id", cb.from.id)
     .eq("status", "done")
     .not("file_id", "is", null)
-    .or("ts_status.is.null,ts_status.eq.failed")
+    .or(`ts_status.is.null,ts_status.eq.failed,and(ts_status.eq.processing,ts_at.lt.${staleIso()})`)
     .select("id, file_id, mime_type, media_type, duration_sec, message_id")
     .maybeSingle();
   if (error) throw error;
@@ -315,7 +320,7 @@ async function handleSummary(cb: any, chatId: number, requestId: number) {
     .eq("telegram_id", cb.from.id)
     .eq("status", "done")
     .not("transcript", "is", null)
-    .or("sum_status.is.null,sum_status.eq.failed")
+    .or(`sum_status.is.null,sum_status.eq.failed,and(sum_status.eq.processing,sum_at.lt.${staleIso()})`)
     .select("id, transcript, message_id")
     .maybeSingle();
   if (error) throw error;
