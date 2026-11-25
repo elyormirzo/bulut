@@ -24,27 +24,44 @@ const SUMMARY_CALL_MS = Number(Deno.env.get("GEMINI_SUMMARY_CALL_MS") ?? 20_000)
 
 export const NO_SPEECH = "[[NO_SPEECH]]";
 
-const PROMPT = `You are a professional transcriber. Transcribe ALL speech in this recording verbatim.
+/** Foydalanuvchi tanlagan yozuv: kirill (standart) yoki lotin. */
+export type Script = "cyrl" | "latn";
+
+function orthography(script: Script): string {
+  return script === "cyrl"
+    ? "The speech is mostly Uzbek. Write Uzbek in the Uzbek CYRILLIC alphabet with standard orthography: ў, қ, ғ, ҳ, ё, ю, я, ц, ъ (for example: «Ўзбекистон», «қишлоқ», «ғалаба», «ҳоким», «маъно»). Never use Latin letters for Uzbek words."
+    : "The speech is mostly Uzbek. Write Uzbek in the modern Latin alphabet with standard orthography: use oʻ, gʻ (with ʻ) and ’ for the tutuq belgisi; sh, ch, ng as usual.";
+}
+
+function unclear(script: Script): string {
+  return script === "cyrl" ? "(тушунарсиз)" : "(tushunarsiz)";
+}
+
+function textPrompt(script: Script): string {
+  return `You are a professional transcriber. Transcribe ALL speech in this recording verbatim.
 
 Rules:
-- The speech is mostly Uzbek. Write Uzbek in the modern Latin alphabet with standard orthography: use oʻ, gʻ (with ʻ) and ’ for the tutuq belgisi; sh, ch, ng as usual.
+- ${orthography(script)}
 - If the speaker switches to Russian, English or another language, write those parts in that language as spoken (Russian in Cyrillic). Do not translate.
 - Add normal punctuation and capitalization. Start a new paragraph when the topic or the speaker changes.
 - Do not add timestamps, speaker labels, titles, notes, summaries or any commentary. Do not wrap the output in quotes or code blocks.
-- Do not invent words. Write an unclear fragment as (tushunarsiz).
+- Do not invent words. Write an unclear fragment as ${unclear(script)}.
 - Ignore music and background noise.
 - If there is no human speech at all, output exactly: ${NO_SPEECH}`;
+}
 
-const SEGMENTS_PROMPT = `You are a professional subtitle editor. Transcribe ALL speech in this recording verbatim and split it into subtitle segments with accurate timestamps.
+function segmentsPrompt(script: Script): string {
+  return `You are a professional subtitle editor. Transcribe ALL speech in this recording verbatim and split it into subtitle segments with accurate timestamps.
 
 Rules:
-- The speech is mostly Uzbek. Write Uzbek in the modern Latin alphabet with standard orthography: use oʻ, gʻ (with ʻ) and ’ for the tutuq belgisi.
+- ${orthography(script)}
 - If the speaker switches to Russian, English or another language, write those parts in that language as spoken (Russian in Cyrillic). Do not translate.
 - Each segment: one short sentence or phrase, at most 84 characters and at most 7 seconds long. Never merge long passages into one segment.
 - "start" and "end" are the times in the recording when the segment is spoken, formatted MM:SS.mmm (for example 01:15.250). Segments must be in order and must not overlap.
 - Add normal punctuation and capitalization. No speaker labels, notes or commentary.
-- Do not invent words. Write an unclear fragment as (tushunarsiz). Ignore music and background noise.
+- Do not invent words. Write an unclear fragment as ${unclear(script)}. Ignore music and background noise.
 - If there is no human speech at all, return an empty array.`;
+}
 
 const SEGMENTS_SCHEMA = {
   type: "ARRAY",
@@ -60,39 +77,58 @@ const SEGMENTS_SCHEMA = {
   },
 };
 
+/** Annotatsiya shabloni so'zlari — tanlangan yozuvda (model formatni aynan shunday takrorlashi uchun). */
+const W = {
+  cyrl: {
+    video: "Видеоматериалда", audio: "Аудиоматериалда", by: "томонидан", activity: "фаолияти танқид қилинган",
+    author: "муаллиф: роли Исм Фамилия", target: "Исм Фамилия (лавозими)", main: "1 гап: асосий танқид нимада",
+    crit: "Танқид қилинган масалалар", props: "Таклифлар", aspects: "Муҳим жиҳатлар", about: "ҳақида сўз боради",
+    issue: "масала", prop: "таклиф", example: "блогер Эшмат Тошматов", president: "Президент", hokim: "туман ҳокими",
+    issues: "масалалар", criticized: "танқид қилинган", tashkilot: "ташкилот", alphabet: "KIRILL",
+  },
+  latn: {
+    video: "Videomaterialda", audio: "Audiomaterialda", by: "tomonidan", activity: "faoliyati tanqid qilingan",
+    author: "muallif: roli Ism Familiya", target: "Ism Familiya (lavozimi)", main: "1 gap: asosiy tanqid nimada",
+    crit: "Tanqid qilingan masalalar", props: "Takliflar", aspects: "Muhim jihatlar", about: "haqida soʻz boradi",
+    issue: "masala", prop: "taklif", example: "bloger Eshmat Toshmatov", president: "Prezident", hokim: "tuman hokimi",
+    issues: "masalalar", criticized: "tanqid qilingan", tashkilot: "tashkilot", alphabet: "LOTIN",
+  },
+};
+
 /**
- * Qisqa xulosa ko'rsatmasi. Birinchi gap: "Videomaterialda/Audiomaterialda [muallif tomonidan] [kim] faoliyati
- * tanqid qilingan." Urg'u — tanqid qilingan masalalar va takliflarda; ismlar faqat matnda aytilgani bo'yicha.
+ * Annotatsiya ko'rsatmasi. Birinchi gap: "Videomaterialda/Audiomaterialda [muallif tomonidan] [kim] faoliyati
+ * tanqid qilingan." Urg'u — salbiy qismga; ismlar faqat matnda aytilgani bo'yicha; qisqa.
  */
-function summaryPrompt(kind: "video" | "audio"): string {
-  const label = kind === "video" ? "Videomaterialda" : "Audiomaterialda";
-  return `Quyida ${kind === "video" ? "videomaterial" : "audiomaterial"}ning toʻliq matni berilgan. Uning annotatsiyasini (qisqa mazmunini) oʻzbek tilida (lotin yozuvida) yoz. "Asosiy fikr" kabi sarlavha qoʻyma.
+function summaryPrompt(kind: "video" | "audio", script: Script): string {
+  const w = W[script];
+  const label = kind === "video" ? w.video : w.audio;
+  return `Quyida ${kind === "video" ? "videomaterial" : "audiomaterial"}ning toʻliq matni berilgan. Uning annotatsiyasini (qisqa mazmunini) oʻzbek tilida, ${w.alphabet} yozuvida yoz. "Asosiy fikr" kabi sarlavha qoʻyma.
 Asosiy urgʻu — materialning salbiy (negativ) qismiga: kim tomonidan, kimning faoliyati va qaysi masalalar tanqid qilingani. Takliflar — ikkinchi darajali, qisqa.
-Xulosa QISQA boʻlsin: jami 600 belgidan oshmasin.
+Annotatsiya QISQA boʻlsin: jami 600 belgidan oshmasin.
 
-Format (aynan shunday, Markdown belgilarisiz):
-${label} <muallif: roli Ism Familiya> tomonidan <Ism Familiya (lavozimi)> faoliyati tanqid qilingan. <1 gap: asosiy tanqid nimada.>
+Format (aynan shunday, Markdown belgilarisiz, ${w.alphabet} yozuvida):
+${label} <${w.author}> ${w.by} <${w.target}> ${w.activity}. <${w.main}.>
 
-Tanqid qilingan masalalar:
-• <masala>
-• <masala>
+${w.crit}:
+• <${w.issue}>
+• <${w.issue}>
 
-Takliflar:
-• <taklif>
+${w.props}:
+• <${w.prop}>
 
 Birinchi gap qoidalari:
 - Javobni albatta "${label}" soʻzi bilan boshla.
-- Muallif — gapirayotgan shaxs. U oʻzini tanishtirsa yoki matnda nomi aniq aytilsa: "${label} <roli> <Ism Familiya> tomonidan …" deb yoz (masalan: "${label} bloger Eshmat Toshmatov tomonidan …"). Roli aytilmagan boʻlsa — faqat ism-familiya. Muallif nomaʼlum boʻlsa, "… tomonidan" qismini yozma.
-- Faoliyati tanqid qilingan shaxslarni ism-familiyasi bilan yoz; lavozimi yoki tashkiloti aytilgan boʻlsa, qavs ichida qoʻsh. Bir necha kishi boʻlsa, vergul bilan sanab oʻt. Lavozim egasi nomsiz tanqid qilingan boʻlsa, lavozimni yoz (masalan: "Prezident", "tuman hokimi"). Tashkilot tanqid qilingan boʻlsa: "<tashkilot> faoliyati tanqid qilingan".
-- Aniq shaxs yoki tashkilot tanqid qilinmagan, lekin muammolar tanqid qilingan boʻlsa: "${label} … tomonidan <masalalar> tanqid qilingan."
-- Matnda umuman tanqid boʻlmasa: "${label} … haqida soʻz boradi." deb yoz va "Tanqid qilingan masalalar" oʻrniga "Muhim jihatlar" boʻlimini yoz.
+- Muallif — gapirayotgan shaxs. U oʻzini tanishtirsa yoki matnda nomi aniq aytilsa: "${label} <roli> <Ism Familiya> ${w.by} …" deb yoz (masalan: "${label} ${w.example} ${w.by} …"). Roli aytilmagan boʻlsa — faqat ism-familiya. Muallif nomaʼlum boʻlsa, "… ${w.by}" qismini yozma.
+- Faoliyati tanqid qilingan shaxslarni ism-familiyasi bilan yoz; lavozimi yoki tashkiloti aytilgan boʻlsa, qavs ichida qoʻsh. Bir necha kishi boʻlsa, vergul bilan sanab oʻt. Lavozim egasi nomsiz tanqid qilingan boʻlsa, lavozimni yoz (masalan: "${w.president}", "${w.hokim}"). Tashkilot tanqid qilingan boʻlsa: "<${w.tashkilot}> ${w.activity}".
+- Aniq shaxs yoki tashkilot tanqid qilinmagan, lekin muammolar tanqid qilingan boʻlsa: "${label} … ${w.by} <${w.issues}> ${w.criticized}."
+- Matnda umuman tanqid boʻlmasa: "${label} … ${w.about}." deb yoz va "${w.crit}" oʻrniga "${w.aspects}" boʻlimini yoz.
 
 Boshqa qoidalar:
-- Ism-familiya, lavozim va tashkilot nomlarini oʻzingdan toʻqima va tuzatma: faqat matnda aniq aytilganini yoz.
-- "Tanqid qilingan masalalar" — 2–5 band: kamchiliklar, qonunbuzarliklar, salbiy holatlar, eʼtirozlar. Eng jiddiylarini birinchi yoz.
-- "Takliflar" — koʻpi bilan 2 band, faqat matnda aniq taklif yoki talab aytilgan boʻlsa; boʻlmasa bu boʻlimni umuman yozma.
+- Ism-familiya, lavozim va tashkilot nomlarini oʻzingdan toʻqima va tuzatma: faqat matnda aniq aytilganini yoz (${w.alphabet} yozuviga oʻgirib).
+- "${w.crit}" — 2–5 band: kamchiliklar, qonunbuzarliklar, salbiy holatlar, eʼtirozlar. Eng jiddiylarini birinchi yoz.
+- "${w.props}" — koʻpi bilan 2 band, faqat matnda aniq taklif yoki talab aytilgan boʻlsa; boʻlmasa bu boʻlimni umuman yozma.
 - Har bir band — bitta qisqa gap (15 soʻzgacha). Umumiy, ijobiy yoki kirish gaplarni yozma.
-- Faqat matnda bor narsani yoz, oʻzingdan qoʻshma. Matn rus yoki boshqa tilda boʻlsa ham xulosani oʻzbekcha yoz.
+- Faqat matnda bor narsani yoz, oʻzingdan qoʻshma. Matn rus yoki boshqa tilda boʻlsa ham annotatsiyani oʻzbekcha (${w.alphabet}) yoz.
 
 Matn:
 `;
@@ -119,6 +155,7 @@ export async function transcribe(
   isVideo: boolean,
   deadline: number, // Date.now() bo'yicha: shu vaqtgacha javob bo'lmasa, to'xtatamiz
   mode: Mode = "text",
+  script: Script = "cyrl",
 ): Promise<Transcript> {
   let uploaded: { name: string; uri: string } | null = null;
   try {
@@ -129,7 +166,7 @@ export async function transcribe(
       uploaded = await uploadFile(bytes, mimeType);
       media = { fileData: { mimeType, fileUri: uploaded.uri } };
     }
-    const parts = [media, { text: mode === "segments" ? SEGMENTS_PROMPT : PROMPT }];
+    const parts = [media, { text: mode === "segments" ? segmentsPrompt(script) : textPrompt(script) }];
     const extra: Record<string, unknown> = mode === "segments"
       ? { responseMimeType: "application/json", responseSchema: SEGMENTS_SCHEMA }
       : {};
@@ -144,9 +181,14 @@ export async function transcribe(
 }
 
 /** Tayyor matndan qisqa xulosa (audio qayta yuborilmaydi — tez va arzon). Yengil model birinchi. */
-export function summarize(transcript: string, deadline: number, kind: "video" | "audio"): Promise<Transcript> {
+export function summarize(
+  transcript: string,
+  deadline: number,
+  kind: "video" | "audio",
+  script: Script = "cyrl",
+): Promise<Transcript> {
   const models = [...SUMMARY_MODELS, ...MODELS.filter((m) => !SUMMARY_MODELS.includes(m))];
-  return runModels([{ text: summaryPrompt(kind) + transcript }], false, deadline,
+  return runModels([{ text: summaryPrompt(kind, script) + transcript }], false, deadline,
     { temperature: 0.2, maxOutputTokens: 2048 }, models, SUMMARY_CALL_MS);
 }
 

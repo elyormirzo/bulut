@@ -6,7 +6,7 @@
 // Telegram'ga darhol 200 qaytariladi, transkripsiya EdgeRuntime.waitUntil bilan fonda bajariladi.
 
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
-import { T } from "./texts.ts";
+import { isScript, T, TS } from "./texts.ts";
 import {
   answerCallback,
   downloadFile,
@@ -21,7 +21,7 @@ import {
   tg,
   webhookSecret,
 } from "./telegram.ts";
-import { BusyError, diagnose, NO_SPEECH, summarize, transcribe } from "./gemini.ts";
+import { BusyError, diagnose, NO_SPEECH, type Script, summarize, transcribe } from "./gemini.ts";
 import { parseSegments, toPlainText, toSrt, toTimestampedText } from "./subtitles.ts";
 
 const DAILY_LIMIT = Number(Deno.env.get("DAILY_LIMIT") ?? 20);
@@ -88,6 +88,7 @@ async function setup() {
       { command: "start", description: "Boshlash" },
       { command: "help", description: "Yordam va cheklovlar" },
       { command: "limit", description: "Bugungi limit" },
+      { command: "yozuv", description: "Kirill yoki lotin yozuvi" },
     ],
   });
   await tg("setMyShortDescription", {
@@ -120,6 +121,19 @@ async function handleMessage(updateId: number, msg: Msg) {
     return void await sendMessage(chatId, T.limit(data ?? 0, DAILY_LIMIT));
   }
 
+  if (command === "/yozuv") {
+    await upsertUser(msg.from);
+    const cur = await userScript(msg.from.id);
+    return void await tg("sendMessage", {
+      chat_id: chatId,
+      text: T.scriptAsk(cur),
+      reply_markup: inlineKeyboard([
+        { text: "Кирилл", callback_data: "script:cyrl" },
+        { text: "Lotin", callback_data: "script:latn" },
+      ]),
+    });
+  }
+
   const media = extractMedia(msg);
   if (!media) return void await sendMessage(chatId, T.unsupported);
 
@@ -147,6 +161,7 @@ async function handleMessage(updateId: number, msg: Msg) {
     return; // duplicate — Telegram qayta yuborgan update
   }
   const requestId: number = start.id;
+  const script: Script = isScript(start.script) ? start.script : "cyrl";
 
   const deadline = Date.now() + GEMINI_BUDGET_MS;
   const status = await sendMessage(chatId, T.processing, msg.message_id);
@@ -160,7 +175,7 @@ async function handleMessage(updateId: number, msg: Msg) {
     }
 
     // Asosiy yo'l: vaqt belgili bo'laklar (bitta so'rov) -> [00:15] matn; .srt keyin shu bo'laklardan.
-    const first = await transcribe(bytes, media.mimeType, media.isVideo, deadline, "segments");
+    const first = await transcribe(bytes, media.mimeType, media.isVideo, deadline, "segments", script);
     const segs = parseSegments(first.text, media.duration);
 
     if (segs && segs.length === 0) {
@@ -174,19 +189,19 @@ async function handleMessage(updateId: number, msg: Msg) {
       await finish(requestId, "done", {
         model: first.model, text_length: plain.length, file_id: media.fileId, transcript: plain, segments: segs,
       });
-      await deliver(chatId, status.message_id, msg.message_id, toTimestampedText(segs), resultKeyboard(requestId, true));
+      await deliver(chatId, status.message_id, msg.message_id, toTimestampedText(segs), resultKeyboard(requestId, true, script));
       return;
     }
 
     // Zaxira: JSON buzuq kelsa, oddiy matn rejimida qayta so'raymiz (vaqt belgilarisiz).
     console.warn(`request ${requestId}: segment JSON buzuq, oddiy matnga o'tildi`);
-    const { text, model } = await transcribe(bytes, media.mimeType, media.isVideo, deadline);
+    const { text, model } = await transcribe(bytes, media.mimeType, media.isVideo, deadline, "text", script);
     if (text.includes(NO_SPEECH) && text.replace(NO_SPEECH, "").trim().length < 5) {
       await editMessage(chatId, status.message_id, T.noSpeech);
       return await finish(requestId, "no_speech", { model });
     }
     await finish(requestId, "done", { model, text_length: text.length, file_id: media.fileId, transcript: text });
-    await deliver(chatId, status.message_id, msg.message_id, text, resultKeyboard(requestId, false));
+    await deliver(chatId, status.message_id, msg.message_id, text, resultKeyboard(requestId, false, script));
   } catch (e) {
     console.error(`request ${requestId}`, e);
     const busy = e instanceof BusyError;
@@ -209,10 +224,10 @@ async function deliver(chatId: number, statusId: number, replyTo: number, text: 
 }
 
 /** Natija ostidagi tugmalar: .srt (bo'laklar bo'lsa) va qisqa xulosa. */
-function resultKeyboard(requestId: number, hasSegments: boolean) {
+function resultKeyboard(requestId: number, hasSegments: boolean, script: Script) {
   const row = [];
-  if (hasSegments) row.push({ text: T.srtButton, callback_data: `srt:${requestId}` });
-  row.push({ text: T.sumButton, callback_data: `sum:${requestId}` });
+  if (hasSegments) row.push({ text: TS[script].srtButton, callback_data: `srt:${requestId}` });
+  row.push({ text: TS[script].sumButton, callback_data: `sum:${requestId}` });
   return inlineKeyboard(row);
 }
 
@@ -241,6 +256,7 @@ async function handleCallback(cb: any) {
   const data: string = cb.data ?? "";
   const chatId: number | undefined = cb.message?.chat?.id;
   if (!chatId || cb.message?.chat?.type !== "private") return void await answerCallback(cb.id);
+  if (data.startsWith("script:")) return await handleScript(cb, chatId, data.slice(7));
   if (data.startsWith("sum:")) return await handleSummary(cb, chatId, Number(data.slice(4)));
   if (data.startsWith("srt:")) return await handleSrt(cb, chatId, Number(data.slice(4)));
   if (!data.startsWith("ts:")) return void await answerCallback(cb.id);
@@ -272,7 +288,8 @@ async function handleCallback(cb: any) {
     const bytes = await downloadFile(req.file_id);
     const isVideo = req.media_type === "video" || req.media_type === "video_note" ||
       (req.mime_type ?? "").startsWith("video/");
-    const { text: raw, model } = await transcribe(bytes, req.mime_type ?? "audio/ogg", isVideo, deadline, "segments");
+    const { text: raw, model } = await transcribe(bytes, req.mime_type ?? "audio/ogg", isVideo, deadline, "segments",
+      await userScript(cb.from.id));
 
     const segs = parseSegments(raw, req.duration_sec ?? undefined);
     if (!segs) throw new Error(`Segment JSON buzuq: ${raw.slice(0, 200)}`);
@@ -332,21 +349,38 @@ async function handleSummary(cb: any, chatId: number, requestId: number) {
 
   await answerCallback(cb.id, T.tsStarted);
   await keepOtherButton(chatId, cb, cb.data);
-  const status = await sendMessage(chatId, T.sumProcessing, req.message_id ?? undefined);
+  const script = await userScript(cb.from.id);
+  const status = await sendMessage(chatId, TS[script].sumProcessing, req.message_id ?? undefined);
   try {
     const isVideo = req.media_type === "video" || req.media_type === "video_note" ||
       (req.mime_type ?? "").startsWith("video/");
-    const { text, model } = await summarize(req.transcript, Date.now() + GEMINI_BUDGET_MS, isVideo ? "video" : "audio");
-    await deliver(chatId, status.message_id, req.message_id, `${T.sumHeader}\n\n${text}`, undefined, "xulosa");
+    const { text, model } = await summarize(req.transcript, Date.now() + GEMINI_BUDGET_MS, isVideo ? "video" : "audio", script);
+    await deliver(chatId, status.message_id, req.message_id, `${TS[script].sumHeader}\n\n${text}`, undefined, "annotatsiya");
     await setSum(requestId, "done");
     console.log(`sum ${requestId}: ${text.length} belgi, ${model}`);
   } catch (e) {
     console.error(`sum ${requestId}`, e);
     const busy = e instanceof BusyError;
     await editMessage(chatId, status.message_id, busy ? T.tsBusy : T.sumFailed,
-      inlineKeyboard([{ text: T.sumButton, callback_data: `sum:${requestId}` }])).catch(() => {});
+      inlineKeyboard([{ text: TS[script].sumButton, callback_data: `sum:${requestId}` }])).catch(() => {});
     await setSum(requestId, "failed");
   }
+}
+
+/** Foydalanuvchi tanlagan yozuv (standart: kirill). */
+async function userScript(telegramId: number): Promise<Script> {
+  const { data } = await db.from("users").select("script").eq("telegram_id", telegramId).maybeSingle();
+  return isScript(data?.script) ? data.script : "cyrl";
+}
+
+// deno-lint-ignore no-explicit-any
+async function handleScript(cb: any, chatId: number, value: string) {
+  if (!isScript(value)) return void await answerCallback(cb.id);
+  await upsertUser(cb.from);
+  const { error } = await db.from("users").update({ script: value }).eq("telegram_id", cb.from.id);
+  if (error) throw error;
+  await answerCallback(cb.id, T.scriptSaved(value));
+  await editMessage(chatId, cb.message.message_id, T.scriptSaved(value));
 }
 
 async function setSum(id: number, sum_status: string) {

@@ -1,4 +1,26 @@
 // Foydalanuvchiga ko'rinadigan barcha matnlar (o'zbek, lotin).
+// Natija bilan bog'liq tugma va sarlavhalar foydalanuvchi tanlagan yozuvda: TS.cyrl / TS.latn.
+
+import type { Script } from "./gemini.ts";
+
+export const TS: Record<Script, { srtButton: string; sumButton: string; sumHeader: string; sumProcessing: string }> = {
+  cyrl: {
+    srtButton: `🎬 .srt субтитр`,
+    sumButton: `📝 Аннотация`,
+    sumHeader: `📝 Аннотация`,
+    sumProcessing: `⏳ Аннотация тайёрланмоқда…`,
+  },
+  latn: {
+    srtButton: `🎬 .srt subtitr`,
+    sumButton: `📝 Annotatsiya`,
+    sumHeader: `📝 Annotatsiya`,
+    sumProcessing: `⏳ Annotatsiya tayyorlanmoqda…`,
+  },
+};
+
+export function isScript(v: unknown): v is Script {
+  return v === "cyrl" || v === "latn";
+}
 
 export const T = {
   start: (name: string, limit: number) =>
@@ -23,7 +45,7 @@ export const T = {
     `• Davomiyligi ${maxMin} daqiqagacha\n` +
     `• Kuniga ${limit} ta so'rov\n\n` +
     `Fayl katta bo'lsa, siqib yoki bo'laklarga bo'lib yuboring.\n\n` +
-    `Buyruqlar:\n/start — boshlash\n/help — yordam\n/limit — bugungi limit`,
+    `Buyruqlar:\n/start — boshlash\n/help — yordam\n/limit — bugungi limit\n/yozuv — kirill yoki lotin yozuvi`,
 
   limit: (used: number, limit: number) =>
     `📊 Bugun ${used} / ${limit} ta so'rov ishlatildi.\n` +
@@ -63,6 +85,12 @@ export const T = {
   longAsFile: `📄 Matn uzun bo'lgani uchun fayl qilib yubordim.`,
 
   fileCaption: `MatnQil — Bulut · @matnqil_bot`,
+
+  scriptAsk: (cur: Script) =>
+    `✍️ Matn va annotatsiya qaysi yozuvda chiqsin?\n` +
+    `Hozir: ${cur === "cyrl" ? "Кирилл" : "Lotin"}`,
+  scriptSaved: (s: Script) =>
+    s === "cyrl" ? `✅ Энди матн кирилл ёзувида чиқади.` : `✅ Endi matn lotin yozuvida chiqadi.`,
 
   tsButton: `⏱ Vaqt belgilari va .srt`,
   srtButton: `🎬 .srt subtitr`,
