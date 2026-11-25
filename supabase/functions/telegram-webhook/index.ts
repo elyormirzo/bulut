@@ -19,11 +19,13 @@ import {
   tg,
   webhookSecret,
 } from "./telegram.ts";
-import { BusyError, NO_SPEECH, transcribe } from "./gemini.ts";
+import { BusyError, diagnose, NO_SPEECH, transcribe } from "./gemini.ts";
 
 const DAILY_LIMIT = Number(Deno.env.get("DAILY_LIMIT") ?? 20);
 const MAX_DURATION_SEC = Number(Deno.env.get("MAX_DURATION_SEC") ?? 20 * 60);
 const MAX_INLINE_CHUNKS = 3; // bundan uzun matn .txt fayl bo'lib boradi
+// Supabase bepul tarifida funksiya ~150 s ishlaydi; javobni yuborishga vaqt qoldiramiz.
+const GEMINI_BUDGET_MS = Number(Deno.env.get("GEMINI_BUDGET_MS") ?? 115_000);
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const db = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
@@ -50,6 +52,9 @@ Deno.serve(async (req) => {
 
   if (req.method === "GET" && url.searchParams.has("setup")) {
     return json(await setup());
+  }
+  if (req.method === "GET" && url.searchParams.has("diag")) {
+    return json(await diagnose(url.searchParams.get("m")?.split(","))); // vaqtinchalik: qaysi Gemini modellari ishlashini ko'rish uchun
   }
   if (req.method !== "POST") return new Response("MatnQil — Bulut", { status: 200 });
 
@@ -138,6 +143,7 @@ async function handleMessage(updateId: number, msg: Msg) {
   }
   const requestId: number = start.id;
 
+  const deadline = Date.now() + GEMINI_BUDGET_MS;
   const status = await sendMessage(chatId, T.processing, msg.message_id);
   tg("sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => {});
 
@@ -148,7 +154,7 @@ async function handleMessage(updateId: number, msg: Msg) {
       return await finish(requestId, "failed", { error: "too_big" });
     }
 
-    const { text, model } = await transcribe(bytes, media.mimeType, media.isVideo);
+    const { text, model } = await transcribe(bytes, media.mimeType, media.isVideo, deadline);
 
     if (text.includes(NO_SPEECH) && text.replace(NO_SPEECH, "").trim().length < 5) {
       await editMessage(chatId, status.message_id, T.noSpeech);

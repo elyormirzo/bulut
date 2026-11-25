@@ -41,7 +41,10 @@ supabase/
 ## Sozlash
 
 Edge Function secrets: `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`.
-Ixtiyoriy: `DAILY_LIMIT`, `MAX_DURATION_SEC`, `GEMINI_MODELS` (vergul bilan, masalan `gemini-2.5-flash,gemini-flash-latest`).
+Ixtiyoriy: `DAILY_LIMIT`, `MAX_DURATION_SEC`, `GEMINI_BUDGET_MS`, `GEMINI_MODELS` (vergul bilan, tartib bo'yicha sinaladi;
+standart: `gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.8-flash,gemini-flash-latest`).
+
+Diagnostika (vaqtinchalik): `GET …/telegram-webhook?diag=1&m=model1,model2` — qaysi modellar ochiq va javob beryapti.
 
 Webhook secret_token alohida saqlanmaydi — bot tokenidan HMAC bilan hosil qilinadi,
 shuning uchun token almashtirilsa, webhook'ni qayta o'rnatish kifoya:

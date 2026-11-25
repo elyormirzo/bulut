@@ -7,11 +7,11 @@ const KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
 const BASE = "https://generativelanguage.googleapis.com";
 const INLINE_MAX_BYTES = 7 * 1024 * 1024;
 // 500/503 ("high demand") bo'lsa shu modelni qayta urinish oralig'i.
-const RETRY_DELAYS_MS = [2000, 5000];
+const RETRY_DELAYS_MS = [2000]; // keyin boshqa modelga o'tamiz
 
 // Birinchisi band bo'lsa yoki topilmasa, keyingisi sinab ko'riladi.
 // (Bepul tarifda har bir modelning limiti alohida, shuning uchun 429 da ham keyingisiga o'tamiz.)
-const MODELS = (Deno.env.get("GEMINI_MODELS") ?? "gemini-2.5-flash,gemini-flash-latest,gemini-2.5-flash-lite")
+const MODELS = (Deno.env.get("GEMINI_MODELS") ?? "gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.8-flash,gemini-flash-latest")
   .split(",").map((s) => s.trim()).filter(Boolean);
 
 export const NO_SPEECH = "[[NO_SPEECH]]";
@@ -30,6 +30,9 @@ Rules:
 /** Gemini limiti yoki vaqtincha band — foydalanuvchiga "navbat ko'p" deyiladi. */
 export class BusyError extends Error {}
 
+/** Vaqt chegarasi tugadi (Supabase funksiyani o'chirib qo'yishidan oldin to'xtaymiz). */
+export class TimeoutError extends BusyError {}
+
 class ModelNotFound extends Error {}
 
 export interface Transcript {
@@ -37,7 +40,12 @@ export interface Transcript {
   model: string;
 }
 
-export async function transcribe(bytes: Uint8Array, mimeType: string, isVideo: boolean): Promise<Transcript> {
+export async function transcribe(
+  bytes: Uint8Array,
+  mimeType: string,
+  isVideo: boolean,
+  deadline: number, // Date.now() bo'yicha: shu vaqtgacha javob bo'lmasa, to'xtatamiz
+): Promise<Transcript> {
   let uploaded: { name: string; uri: string } | null = null;
   try {
     let media: Record<string, unknown>;
@@ -53,14 +61,18 @@ export async function transcribe(bytes: Uint8Array, mimeType: string, isVideo: b
     let anyBusy = false;
     for (const model of MODELS) {
       try {
-        return { text: await generate(model, parts, isVideo), model };
+        if (deadline - Date.now() < 10_000) break;
+        return { text: await generate(model, parts, isVideo, deadline), model };
       } catch (e) {
+        if (e instanceof TimeoutError) throw e;
         if (e instanceof BusyError) { anyBusy = true; lastErr = e; console.warn(`${model} band:`, String(e).slice(0, 200)); continue; }
-        if (e instanceof ModelNotFound) { lastErr = e; console.warn(`${model} topilmadi`); continue; }
+        if (e instanceof ModelNotFound) { lastErr = e; console.warn(`${model} topilmadi:`, e.message); continue; }
         throw e;
       }
     }
-    if (anyBusy) throw lastErr instanceof BusyError ? lastErr : new BusyError(String(lastErr));
+    if (anyBusy || deadline - Date.now() < 10_000) {
+      throw lastErr instanceof BusyError ? lastErr : new BusyError(String(lastErr ?? "vaqt tugadi"));
+    }
     throw lastErr ?? new Error("Gemini modeli topilmadi");
   } finally {
     if (uploaded) {
@@ -71,20 +83,32 @@ export async function transcribe(bytes: Uint8Array, mimeType: string, isVideo: b
   }
 }
 
-async function generate(model: string, parts: unknown[], isVideo: boolean): Promise<string> {
+async function generate(model: string, parts: unknown[], isVideo: boolean, deadline: number): Promise<string> {
   const generationConfig: Record<string, unknown> = { temperature: 0, maxOutputTokens: 32768 };
   if (isVideo) generationConfig.mediaResolution = "MEDIA_RESOLUTION_LOW";
-  // 2.5 Flash'da "o'ylash"ni o'chiramiz: transkripsiya uchun keraksiz va sekinlashtiradi.
-  if (model.startsWith("gemini-2.5-flash")) generationConfig.thinkingConfig = { thinkingBudget: 0 };
-
-  const body = JSON.stringify({ contents: [{ role: "user", parts }], generationConfig });
+  // "O'ylash"ni minimal qilamiz: transkripsiya uchun keraksiz va juda sekinlashtiradi.
+  if (model.startsWith("gemini-2.5")) generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  else generationConfig.thinkingConfig = { thinkingLevel: "minimal" };
 
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(`${BASE}/v1beta/models/${model}:generateContent`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": KEY },
-      body,
-    });
+    const left = deadline - Date.now();
+    if (left < 5_000) throw new TimeoutError(`${model}: vaqt tugadi`);
+    const t0 = Date.now();
+    let res: Response;
+    try {
+      res = await fetch(`${BASE}/v1beta/models/${model}:generateContent`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": KEY },
+        body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig }),
+        signal: AbortSignal.timeout(left),
+      });
+    } catch (e) {
+      if (e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError")) {
+        throw new TimeoutError(`${model}: ${Math.round((Date.now() - t0) / 1000)} s da javob bermadi`);
+      }
+      throw e;
+    }
+    console.log(`${model} -> ${res.status} (${Date.now() - t0} ms)`);
 
     if (res.ok) {
       const data = await res.json();
@@ -102,7 +126,11 @@ async function generate(model: string, parts: unknown[], isVideo: boolean): Prom
     }
 
     const errText = await res.text();
-    if (res.status === 404) throw new ModelNotFound(`${model}: ${errText.slice(0, 200)}`);
+    if (res.status === 400 && generationConfig.thinkingConfig && /thinking/i.test(errText)) {
+      delete generationConfig.thinkingConfig; // bu model bunday sozlamani qo'llamaydi
+      continue;
+    }
+    if (res.status === 404) throw new ModelNotFound(`${model}: ${errText.slice(0, 300)}`);
     if (res.status === 429) throw new BusyError(`Gemini 429: ${errText.slice(0, 300)}`);
     if ((res.status === 500 || res.status === 503) && attempt < RETRY_DELAYS_MS.length) {
       await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
@@ -111,6 +139,34 @@ async function generate(model: string, parts: unknown[], isVideo: boolean): Prom
     if (res.status === 500 || res.status === 503) throw new BusyError(`Gemini ${res.status}: ${errText.slice(0, 300)}`);
     throw new Error(`Gemini ${res.status}: ${errText.slice(0, 500)}`);
   }
+}
+
+/** Diagnostika: bu kalit bilan ochiq "flash" modellari va har biriga qisqa sinov so'rovi. */
+export async function diagnose(only?: string[]) {
+  const r = await fetch(`${BASE}/v1beta/models?pageSize=200`, { headers: { "x-goog-api-key": KEY } });
+  const list = r.ok ? await r.json() : { error: r.status };
+  const flash = (list.models ?? [])
+    .filter((m: { name: string; supportedGenerationMethods?: string[] }) =>
+      /flash/.test(m.name) && m.supportedGenerationMethods?.includes("generateContent"))
+    .map((m: { name: string }) => m.name.replace("models/", ""));
+  const probes: Record<string, string> = {};
+  const toProbe = (only?.length ? only : MODELS).filter((m) => /^gemini-[\w.-]+$/.test(m)).slice(0, 8);
+  for (const model of toProbe) {
+    const t0 = Date.now();
+    try {
+      const res = await fetch(`${BASE}/v1beta/models/${model}:generateContent`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": KEY },
+        body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "Say OK" }] }] }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      const body = await res.text();
+      probes[model] = `${res.status} ${Date.now() - t0}ms ${res.ok ? "" : body.slice(0, 160)}`;
+    } catch (e) {
+      probes[model] = `xato ${Date.now() - t0}ms ${String(e).slice(0, 100)}`;
+    }
+  }
+  return { models_list_status: r.status, flash, probes };
 }
 
 async function uploadFile(bytes: Uint8Array, mimeType: string): Promise<{ name: string; uri: string }> {
@@ -140,7 +196,7 @@ async function uploadFile(bytes: Uint8Array, mimeType: string): Promise<{ name: 
   let file = (await up.json()).file as { name: string; uri: string; state?: string };
 
   // Video fayllar avval qayta ishlanadi (PROCESSING → ACTIVE).
-  for (let i = 0; file.state === "PROCESSING" && i < 45; i++) {
+  for (let i = 0; file.state === "PROCESSING" && i < 30; i++) {
     await new Promise((r) => setTimeout(r, 2000));
     const r = await fetch(`${BASE}/v1beta/${file.name}`, { headers: { "x-goog-api-key": KEY } });
     if (!r.ok) throw new Error(`Gemini file status ${r.status}`);
