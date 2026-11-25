@@ -14,6 +14,14 @@ const RETRY_DELAYS_MS = [2000]; // keyin boshqa modelga o'tamiz
 const MODELS = (Deno.env.get("GEMINI_MODELS") ?? "gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.8-flash,gemini-flash-latest")
   .split(",").map((s) => s.trim()).filter(Boolean);
 
+// Xulosa matndan yasaladi — yengil model yetarli va ancha tez.
+const SUMMARY_MODELS = (Deno.env.get("GEMINI_SUMMARY_MODELS") ?? "gemini-3.5-flash-lite,gemini-3.5-flash")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+
+// Bitta modelni qancha kutamiz (keyin keyingisiga o'tamiz).
+const TRANSCRIBE_CALL_MS = Number(Deno.env.get("GEMINI_TRANSCRIBE_CALL_MS") ?? 75_000);
+const SUMMARY_CALL_MS = Number(Deno.env.get("GEMINI_SUMMARY_CALL_MS") ?? 20_000);
+
 export const NO_SPEECH = "[[NO_SPEECH]]";
 
 const PROMPT = `You are a professional transcriber. Transcribe ALL speech in this recording verbatim.
@@ -104,7 +112,7 @@ export async function transcribe(
     const extra: Record<string, unknown> = mode === "segments"
       ? { responseMimeType: "application/json", responseSchema: SEGMENTS_SCHEMA }
       : {};
-    return await runModels(parts, isVideo, deadline, extra);
+    return await runModels(parts, isVideo, deadline, extra, MODELS, TRANSCRIBE_CALL_MS);
   } finally {
     if (uploaded) {
       fetch(`${BASE}/v1beta/${uploaded.name}`, { method: "DELETE", headers: { "x-goog-api-key": KEY } })
@@ -114,9 +122,11 @@ export async function transcribe(
   }
 }
 
-/** Tayyor matndan qisqa xulosa (audio qayta yuborilmaydi — tez va arzon). */
+/** Tayyor matndan qisqa xulosa (audio qayta yuborilmaydi — tez va arzon). Yengil model birinchi. */
 export function summarize(transcript: string, deadline: number): Promise<Transcript> {
-  return runModels([{ text: SUMMARY_PROMPT + transcript }], false, deadline, { temperature: 0.2, maxOutputTokens: 2048 });
+  const models = [...SUMMARY_MODELS, ...MODELS.filter((m) => !SUMMARY_MODELS.includes(m))];
+  return runModels([{ text: SUMMARY_PROMPT + transcript }], false, deadline,
+    { temperature: 0.2, maxOutputTokens: 2048 }, models, SUMMARY_CALL_MS);
 }
 
 /** Modellarni navbat bilan sinaydi: band (503/429) yoki topilmasa keyingisiga o'tadi. */
@@ -125,13 +135,15 @@ async function runModels(
   isVideo: boolean,
   deadline: number,
   extra: Record<string, unknown>,
+  models: string[],
+  callMs: number,
 ): Promise<Transcript> {
   let lastErr: unknown;
   let anyBusy = false;
-  for (const model of MODELS) {
+  for (const model of models) {
     try {
       if (deadline - Date.now() < 10_000) break;
-      return { text: await generate(model, parts, isVideo, deadline, extra), model };
+      return { text: await generate(model, parts, isVideo, Math.min(deadline, Date.now() + callMs), extra, deadline), model };
     } catch (e) {
       if (e instanceof TimeoutError) throw e;
       if (e instanceof BusyError) { anyBusy = true; lastErr = e; console.warn(`${model} band:`, String(e).slice(0, 200)); continue; }
@@ -145,12 +157,17 @@ async function runModels(
   throw lastErr ?? new Error("Gemini modeli topilmadi");
 }
 
+/**
+ * callDeadline — shu modelga ajratilgan vaqt; tugasa BusyError (keyingi model sinaladi).
+ * deadline — umumiy vaqt; tugasa TimeoutError (boshqa urinish yo'q).
+ */
 async function generate(
   model: string,
   parts: unknown[],
   isVideo: boolean,
-  deadline: number,
+  callDeadline: number,
   extra: Record<string, unknown> = {},
+  deadline = callDeadline,
 ): Promise<string> {
   const generationConfig: Record<string, unknown> = { temperature: 0, maxOutputTokens: 32768, ...extra };
   if (isVideo) generationConfig.mediaResolution = "MEDIA_RESOLUTION_LOW";
@@ -159,8 +176,9 @@ async function generate(
   else generationConfig.thinkingConfig = { thinkingLevel: "minimal" };
 
   for (let attempt = 0; ; attempt++) {
-    const left = deadline - Date.now();
-    if (left < 5_000) throw new TimeoutError(`${model}: vaqt tugadi`);
+    if (deadline - Date.now() < 5_000) throw new TimeoutError(`${model}: vaqt tugadi`);
+    const left = callDeadline - Date.now();
+    if (left < 3_000) throw new BusyError(`${model}: ajratilgan vaqt tugadi`);
     const t0 = Date.now();
     let res: Response;
     try {
@@ -172,7 +190,9 @@ async function generate(
       });
     } catch (e) {
       if (e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError")) {
-        throw new TimeoutError(`${model}: ${Math.round((Date.now() - t0) / 1000)} s da javob bermadi`);
+        const msg = `${model}: ${Math.round((Date.now() - t0) / 1000)} s da javob bermadi`;
+        // Umumiy vaqt ham tugagan bo'lsa — to'xtaymiz; aks holda keyingi modelga o'tamiz.
+        throw deadline - Date.now() < 10_000 ? new TimeoutError(msg) : new BusyError(msg);
       }
       throw e;
     }
