@@ -1,0 +1,5 @@
+project_id = "mdkqeknigvfoeegpykxr"
+
+[functions.telegram-webhook]
+# Telegram JWT yubormaydi; so'rov X-Telegram-Bot-Api-Secret-Token orqali tekshiriladi.
+verify_jwt = false
