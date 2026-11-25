@@ -79,17 +79,37 @@ export function toSrt(segs: Segment[]): string {
     .join("\n");
 }
 
-/** "[00:15] matn" qatorlari. Yaqin bo'laklar bitta qatorga birlashtiriladi (o'qishga qulay). */
-export function toTimestampedText(segs: Segment[], groupSec = 20): string {
-  const lines: string[] = [];
+/** Yaqin bo'laklarni ~20 soniyalik xatboshilarga guruhlaydi (o'qishga qulay). */
+function paragraphs(segs: Segment[], groupSec = 20): { start: number; text: string }[] {
+  const out: { start: number; parts: string[] }[] = [];
   let cur: { start: number; parts: string[] } | null = null;
   for (const s of segs) {
-    if (!cur || s.start - cur.start >= groupSec || /[.!?…]$/.test(cur.parts.at(-1) ?? "") && s.start - cur.start >= groupSec / 2) {
-      if (cur) lines.push(`[${shortTime(cur.start)}] ${cur.parts.join(" ")}`);
+    const lastEndsSentence = /[.!?…]$/.test(cur?.parts.at(-1) ?? "");
+    if (!cur || s.start - cur.start >= groupSec || (lastEndsSentence && s.start - cur.start >= groupSec / 2)) {
       cur = { start: s.start, parts: [] };
+      out.push(cur);
     }
     cur.parts.push(s.text);
   }
-  if (cur) lines.push(`[${shortTime(cur.start)}] ${cur.parts.join(" ")}`);
-  return lines.join("\n\n");
+  return out.map((p) => ({ start: p.start, text: p.parts.join(" ") }));
+}
+
+/** "[00:15] matn" ko'rinishidagi xatboshilar. */
+export function toTimestampedText(segs: Segment[], groupSec = 20): string {
+  return paragraphs(segs, groupSec).map((p) => `[${shortTime(p.start)}] ${p.text}`).join("\n\n");
+}
+
+/** Vaqtsiz oddiy matn (xulosa uchun saqlanadi). */
+export function toPlainText(segs: Segment[], groupSec = 20): string {
+  return paragraphs(segs, groupSec).map((p) => p.text).join("\n\n");
+}
+
+/** Gemini qaytargan JSON matnni bo'laklarga aylantiradi. Buzuq bo'lsa null. */
+export function parseSegments(raw: string, durationSec?: number): Segment[] | null {
+  try {
+    const parsed = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, ""));
+    return normalizeSegments(Array.isArray(parsed) ? parsed : [], durationSec);
+  } catch {
+    return null;
+  }
 }

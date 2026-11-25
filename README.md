@@ -19,9 +19,12 @@ Telegram ──webhook──▶ Edge Function `telegram-webhook`
 
 Qabul qilinadi: ovozli xabar, video-doira, audio, video, audio/video hujjat.
 
-Matn ostida ikki tugma (kunlik limitdan yechilmaydi, har biri bir yozuvga bir marta):
-- **⏱ Vaqt belgilari va .srt** — faylni qayta Gemini'ga yuborib, `[00:15] …` ko'rinishidagi matn va `.srt` subtitr qaytaradi.
-- **📝 Qisqa xulosa** — saqlangan matndan (audio qayta yuborilmaydi) asosiy fikr va muhim nuqtalar.
+Natija darhol vaqt belgilari bilan keladi (`[00:15] …`, ~20 soniyalik xatboshilar). Gemini'dan bitta
+so'rovda JSON bo'laklar olinadi va `requests.segments` ga saqlanadi; JSON buzuq kelsa — oddiy matn rejimiga o'tiladi.
+
+Matn ostida ikki tugma (kunlik limitdan yechilmaydi):
+- **🎬 .srt subtitr** — saqlangan bo'laklardan bir zumda (Gemini chaqirilmaydi).
+- **📝 Qisqa xulosa** — saqlangan matndan (audio qayta yuborilmaydi), bir yozuvga bir marta.
 
 Cheklovlar:
 - **20 MB** — Telegram Bot API `getFile` bundan katta faylni bermaydi.

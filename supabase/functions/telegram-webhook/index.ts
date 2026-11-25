@@ -22,7 +22,7 @@ import {
   webhookSecret,
 } from "./telegram.ts";
 import { BusyError, diagnose, NO_SPEECH, summarize, transcribe } from "./gemini.ts";
-import { normalizeSegments, type RawSegment, toSrt, toTimestampedText } from "./subtitles.ts";
+import { parseSegments, toPlainText, toSrt, toTimestampedText } from "./subtitles.ts";
 
 const DAILY_LIMIT = Number(Deno.env.get("DAILY_LIMIT") ?? 20);
 const MAX_DURATION_SEC = Number(Deno.env.get("MAX_DURATION_SEC") ?? 20 * 60);
@@ -159,16 +159,34 @@ async function handleMessage(updateId: number, msg: Msg) {
       return await finish(requestId, "failed", { error: "too_big" });
     }
 
-    const { text, model } = await transcribe(bytes, media.mimeType, media.isVideo, deadline);
+    // Asosiy yo'l: vaqt belgili bo'laklar (bitta so'rov) -> [00:15] matn; .srt keyin shu bo'laklardan.
+    const first = await transcribe(bytes, media.mimeType, media.isVideo, deadline, "segments");
+    const segs = parseSegments(first.text, media.duration);
 
+    if (segs && segs.length === 0) {
+      await editMessage(chatId, status.message_id, T.noSpeech);
+      return await finish(requestId, "no_speech", { model: first.model });
+    }
+
+    if (segs) {
+      const plain = toPlainText(segs);
+      // Avval saqlaymiz, keyin yuboramiz: tugma bosilganda yozuv tayyor bo'lsin.
+      await finish(requestId, "done", {
+        model: first.model, text_length: plain.length, file_id: media.fileId, transcript: plain, segments: segs,
+      });
+      await deliver(chatId, status.message_id, msg.message_id, toTimestampedText(segs), resultKeyboard(requestId, true));
+      return;
+    }
+
+    // Zaxira: JSON buzuq kelsa, oddiy matn rejimida qayta so'raymiz (vaqt belgilarisiz).
+    console.warn(`request ${requestId}: segment JSON buzuq, oddiy matnga o'tildi`);
+    const { text, model } = await transcribe(bytes, media.mimeType, media.isVideo, deadline);
     if (text.includes(NO_SPEECH) && text.replace(NO_SPEECH, "").trim().length < 5) {
       await editMessage(chatId, status.message_id, T.noSpeech);
       return await finish(requestId, "no_speech", { model });
     }
-
-    // Avval saqlaymiz, keyin yuboramiz: tugma bosilganda yozuv tayyor bo'lsin.
     await finish(requestId, "done", { model, text_length: text.length, file_id: media.fileId, transcript: text });
-    await deliver(chatId, status.message_id, msg.message_id, text, resultKeyboard(requestId, true, true));
+    await deliver(chatId, status.message_id, msg.message_id, text, resultKeyboard(requestId, false));
   } catch (e) {
     console.error(`request ${requestId}`, e);
     const busy = e instanceof BusyError;
@@ -190,11 +208,12 @@ async function deliver(chatId: number, statusId: number, replyTo: number, text: 
   await editMessage(chatId, statusId, `${T.longAsFile}\n\n${preview}…`, keyboard);
 }
 
-function resultKeyboard(requestId: number, ts: boolean, sum: boolean) {
+/** Natija ostidagi tugmalar: .srt (bo'laklar bo'lsa) va qisqa xulosa. */
+function resultKeyboard(requestId: number, hasSegments: boolean) {
   const row = [];
-  if (ts) row.push({ text: T.tsButton, callback_data: `ts:${requestId}` });
-  if (sum) row.push({ text: T.sumButton, callback_data: `sum:${requestId}` });
-  return row.length ? inlineKeyboard(row) : { inline_keyboard: [] };
+  if (hasSegments) row.push({ text: T.srtButton, callback_data: `srt:${requestId}` });
+  row.push({ text: T.sumButton, callback_data: `sum:${requestId}` });
+  return inlineKeyboard(row);
 }
 
 /** Bosilgan tugmani olib tashlaydi, qolganini qoldiradi. */
@@ -218,6 +237,7 @@ async function handleCallback(cb: any) {
   const chatId: number | undefined = cb.message?.chat?.id;
   if (!chatId || cb.message?.chat?.type !== "private") return void await answerCallback(cb.id);
   if (data.startsWith("sum:")) return await handleSummary(cb, chatId, Number(data.slice(4)));
+  if (data.startsWith("srt:")) return await handleSrt(cb, chatId, Number(data.slice(4)));
   if (!data.startsWith("ts:")) return void await answerCallback(cb.id);
   const requestId = Number(data.slice(3));
 
@@ -249,13 +269,8 @@ async function handleCallback(cb: any) {
       (req.mime_type ?? "").startsWith("video/");
     const { text: raw, model } = await transcribe(bytes, req.mime_type ?? "audio/ogg", isVideo, deadline, "segments");
 
-    let parsed: RawSegment[];
-    try {
-      parsed = JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, ""));
-    } catch {
-      throw new Error(`Segment JSON buzuq: ${raw.slice(0, 200)}`);
-    }
-    const segs = normalizeSegments(Array.isArray(parsed) ? parsed : [], req.duration_sec ?? undefined);
+    const segs = parseSegments(raw, req.duration_sec ?? undefined);
+    if (!segs) throw new Error(`Segment JSON buzuq: ${raw.slice(0, 200)}`);
     if (!segs.length) {
       await editMessage(chatId, status.message_id, T.tsNoSpeech);
       return await setTs(requestId, "done");
@@ -273,6 +288,23 @@ async function handleCallback(cb: any) {
       inlineKeyboard([{ text: T.tsButton, callback_data: `ts:${requestId}` }])).catch(() => {});
     await setTs(requestId, "failed");
   }
+}
+
+/** .srt: saqlangan bo'laklardan yasaladi — Gemini chaqirilmaydi, bir zumda. */
+// deno-lint-ignore no-explicit-any
+async function handleSrt(cb: any, chatId: number, requestId: number) {
+  const { data: req, error } = await db.from("requests")
+    .select("id, segments, message_id")
+    .eq("id", requestId)
+    .eq("telegram_id", cb.from.id)
+    .maybeSingle();
+  if (error) throw error;
+  if (!req?.segments?.length) return void await answerCallback(cb.id, T.tsNotFound);
+
+  await answerCallback(cb.id);
+  await keepOtherButton(chatId, cb, cb.data);
+  await sendTextDocument(chatId, `subtitr-${stamp()}.srt`, toSrt(req.segments), T.srtCaption,
+    req.message_id ?? undefined, "application/x-subrip");
 }
 
 // deno-lint-ignore no-explicit-any

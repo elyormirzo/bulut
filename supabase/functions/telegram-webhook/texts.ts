@@ -65,6 +65,7 @@ export const T = {
   fileCaption: `MatnQil — Bulut · @matnqil_bot`,
 
   tsButton: `⏱ Vaqt belgilari va .srt`,
+  srtButton: `🎬 .srt subtitr`,
   sumButton: `📝 Qisqa xulosa`,
   sumProcessing: `⏳ Qisqa xulosa tayyorlanmoqda…`,
   sumHeader: `📝 Qisqa xulosa`,
