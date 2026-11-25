@@ -8,8 +8,10 @@
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { T } from "./texts.ts";
 import {
+  answerCallback,
   downloadFile,
   editMessage,
+  inlineKeyboard,
   MAX_DOWNLOAD_BYTES,
   MAX_MESSAGE,
   safeEqual,
@@ -19,7 +21,8 @@ import {
   tg,
   webhookSecret,
 } from "./telegram.ts";
-import { BusyError, diagnose, NO_SPEECH, transcribe } from "./gemini.ts";
+import { BusyError, diagnose, NO_SPEECH, summarize, transcribe } from "./gemini.ts";
+import { normalizeSegments, type RawSegment, toSrt, toTimestampedText } from "./subtitles.ts";
 
 const DAILY_LIMIT = Number(Deno.env.get("DAILY_LIMIT") ?? 20);
 const MAX_DURATION_SEC = Number(Deno.env.get("MAX_DURATION_SEC") ?? 20 * 60);
@@ -66,6 +69,8 @@ Deno.serve(async (req) => {
     EdgeRuntime.waitUntil(
       handleMessage(update.update_id, update.message).catch((e) => console.error("handleMessage", e)),
     );
+  } else if (update?.callback_query) {
+    EdgeRuntime.waitUntil(handleCallback(update.callback_query).catch((e) => console.error("handleCallback", e)));
   }
   return new Response("ok");
 });
@@ -75,7 +80,7 @@ async function setup() {
   await tg("setWebhook", {
     url: webhookUrl,
     secret_token: await webhookSecret(),
-    allowed_updates: ["message"],
+    allowed_updates: ["message", "callback_query"],
     max_connections: 20,
   });
   await tg("setMyCommands", {
@@ -161,8 +166,9 @@ async function handleMessage(updateId: number, msg: Msg) {
       return await finish(requestId, "no_speech", { model });
     }
 
-    await deliver(chatId, status.message_id, msg.message_id, text);
-    await finish(requestId, "done", { model, text_length: text.length });
+    // Avval saqlaymiz, keyin yuboramiz: tugma bosilganda yozuv tayyor bo'lsin.
+    await finish(requestId, "done", { model, text_length: text.length, file_id: media.fileId, transcript: text });
+    await deliver(chatId, status.message_id, msg.message_id, text, resultKeyboard(requestId, true, true));
   } catch (e) {
     console.error(`request ${requestId}`, e);
     const busy = e instanceof BusyError;
@@ -171,17 +177,147 @@ async function handleMessage(updateId: number, msg: Msg) {
   }
 }
 
-async function deliver(chatId: number, statusId: number, replyTo: number, text: string) {
+/** Matnni yuboradi: kichik bo'lsa xabar(lar), katta bo'lsa .txt fayl. Tugma birinchi xabarga qo'yiladi. */
+async function deliver(chatId: number, statusId: number, replyTo: number, text: string, keyboard?: unknown, name = "matn") {
   const chunks = splitText(text);
   if (chunks.length <= MAX_INLINE_CHUNKS) {
-    await editMessage(chatId, statusId, chunks[0]);
+    await editMessage(chatId, statusId, chunks[0], keyboard);
     for (const c of chunks.slice(1)) await sendMessage(chatId, c);
     return;
   }
-  const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
-  await sendTextDocument(chatId, `matn-${stamp}.txt`, text + "\n", T.fileCaption, replyTo);
+  await sendTextDocument(chatId, `${name}-${stamp()}.txt`, text + "\n", T.fileCaption, replyTo);
   const preview = text.slice(0, MAX_MESSAGE - 200).replace(/\s+\S*$/, "");
-  await editMessage(chatId, statusId, `${T.longAsFile}\n\n${preview}…`);
+  await editMessage(chatId, statusId, `${T.longAsFile}\n\n${preview}…`, keyboard);
+}
+
+function resultKeyboard(requestId: number, ts: boolean, sum: boolean) {
+  const row = [];
+  if (ts) row.push({ text: T.tsButton, callback_data: `ts:${requestId}` });
+  if (sum) row.push({ text: T.sumButton, callback_data: `sum:${requestId}` });
+  return row.length ? inlineKeyboard(row) : { inline_keyboard: [] };
+}
+
+/** Bosilgan tugmani olib tashlaydi, qolganini qoldiradi. */
+function keepOtherButton(chatId: number, cb: { message?: { message_id: number; reply_markup?: { inline_keyboard?: { callback_data?: string }[][] } } }, pressed: string) {
+  const rows = cb.message?.reply_markup?.inline_keyboard ?? [];
+  const left = rows.map((r) => r.filter((b) => b.callback_data !== pressed)).filter((r) => r.length);
+  return tg("editMessageReplyMarkup", {
+    chat_id: chatId,
+    message_id: cb.message!.message_id,
+    reply_markup: { inline_keyboard: left },
+  }).catch(() => {});
+}
+
+function stamp() {
+  return new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+}
+
+// deno-lint-ignore no-explicit-any
+async function handleCallback(cb: any) {
+  const data: string = cb.data ?? "";
+  const chatId: number | undefined = cb.message?.chat?.id;
+  if (!chatId || cb.message?.chat?.type !== "private") return void await answerCallback(cb.id);
+  if (data.startsWith("sum:")) return await handleSummary(cb, chatId, Number(data.slice(4)));
+  if (!data.startsWith("ts:")) return void await answerCallback(cb.id);
+  const requestId = Number(data.slice(3));
+
+  // Atomar "band qilish": faqat o'z yozuvi, va faqat hali tayyorlanmagan (yoki xato bo'lgan) bo'lsa.
+  const { data: req, error } = await db.from("requests")
+    .update({ ts_status: "processing", ts_at: new Date().toISOString() })
+    .eq("id", requestId)
+    .eq("telegram_id", cb.from.id)
+    .eq("status", "done")
+    .not("file_id", "is", null)
+    .or("ts_status.is.null,ts_status.eq.failed")
+    .select("id, file_id, mime_type, media_type, duration_sec, message_id")
+    .maybeSingle();
+  if (error) throw error;
+  if (!req) {
+    const { data: exists } = await db.from("requests").select("id").eq("id", requestId).eq("telegram_id", cb.from.id)
+      .maybeSingle();
+    return void await answerCallback(cb.id, exists ? T.tsAlready : T.tsNotFound);
+  }
+
+  await answerCallback(cb.id, T.tsStarted);
+  await keepOtherButton(chatId, cb, data);
+  const deadline = Date.now() + GEMINI_BUDGET_MS;
+  const status = await sendMessage(chatId, T.tsProcessing, req.message_id ?? undefined);
+
+  try {
+    const bytes = await downloadFile(req.file_id);
+    const isVideo = req.media_type === "video" || req.media_type === "video_note" ||
+      (req.mime_type ?? "").startsWith("video/");
+    const { text: raw, model } = await transcribe(bytes, req.mime_type ?? "audio/ogg", isVideo, deadline, "segments");
+
+    let parsed: RawSegment[];
+    try {
+      parsed = JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, ""));
+    } catch {
+      throw new Error(`Segment JSON buzuq: ${raw.slice(0, 200)}`);
+    }
+    const segs = normalizeSegments(Array.isArray(parsed) ? parsed : [], req.duration_sec ?? undefined);
+    if (!segs.length) {
+      await editMessage(chatId, status.message_id, T.tsNoSpeech);
+      return await setTs(requestId, "done");
+    }
+
+    await deliver(chatId, status.message_id, req.message_id, `${T.tsHeader}\n\n${toTimestampedText(segs)}`, undefined, "vaqt");
+    await sendTextDocument(chatId, `subtitr-${stamp()}.srt`, toSrt(segs), T.srtCaption, req.message_id ?? undefined,
+      "application/x-subrip");
+    await setTs(requestId, "done");
+    console.log(`ts ${requestId}: ${segs.length} segment, ${model}`);
+  } catch (e) {
+    console.error(`ts ${requestId}`, e);
+    const busy = e instanceof BusyError;
+    await editMessage(chatId, status.message_id, busy ? T.tsBusy : T.tsFailed,
+      inlineKeyboard([{ text: T.tsButton, callback_data: `ts:${requestId}` }])).catch(() => {});
+    await setTs(requestId, "failed");
+  }
+}
+
+// deno-lint-ignore no-explicit-any
+async function handleSummary(cb: any, chatId: number, requestId: number) {
+  const { data: req, error } = await db.from("requests")
+    .update({ sum_status: "processing", sum_at: new Date().toISOString() })
+    .eq("id", requestId)
+    .eq("telegram_id", cb.from.id)
+    .eq("status", "done")
+    .not("transcript", "is", null)
+    .or("sum_status.is.null,sum_status.eq.failed")
+    .select("id, transcript, message_id")
+    .maybeSingle();
+  if (error) throw error;
+  if (!req) {
+    const { data: exists } = await db.from("requests").select("id").eq("id", requestId).eq("telegram_id", cb.from.id)
+      .maybeSingle();
+    return void await answerCallback(cb.id, exists ? T.sumAlready : T.tsNotFound);
+  }
+
+  await answerCallback(cb.id, T.tsStarted);
+  await keepOtherButton(chatId, cb, cb.data);
+  const status = await sendMessage(chatId, T.sumProcessing, req.message_id ?? undefined);
+  try {
+    const { text, model } = await summarize(req.transcript, Date.now() + GEMINI_BUDGET_MS);
+    await deliver(chatId, status.message_id, req.message_id, `${T.sumHeader}\n\n${text}`, undefined, "xulosa");
+    await setSum(requestId, "done");
+    console.log(`sum ${requestId}: ${text.length} belgi, ${model}`);
+  } catch (e) {
+    console.error(`sum ${requestId}`, e);
+    const busy = e instanceof BusyError;
+    await editMessage(chatId, status.message_id, busy ? T.tsBusy : T.sumFailed,
+      inlineKeyboard([{ text: T.sumButton, callback_data: `sum:${requestId}` }])).catch(() => {});
+    await setSum(requestId, "failed");
+  }
+}
+
+async function setSum(id: number, sum_status: string) {
+  const { error } = await db.from("requests").update({ sum_status, sum_at: new Date().toISOString() }).eq("id", id);
+  if (error) console.error("setSum", error);
+}
+
+async function setTs(id: number, ts_status: string) {
+  const { error } = await db.from("requests").update({ ts_status, ts_at: new Date().toISOString() }).eq("id", id);
+  if (error) console.error("setTs", error);
 }
 
 function extractMedia(msg: Msg): Media | null {

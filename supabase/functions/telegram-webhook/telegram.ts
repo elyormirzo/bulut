@@ -33,29 +33,60 @@ export function sendMessage(chatId: number, text: string, replyTo?: number) {
   });
 }
 
-export async function editMessage(chatId: number, messageId: number, text: string) {
+export interface InlineButton {
+  text: string;
+  callback_data: string;
+}
+
+export function inlineKeyboard(...rows: InlineButton[][]) {
+  return { inline_keyboard: rows };
+}
+
+export async function editMessage(chatId: number, messageId: number, text: string, replyMarkup?: unknown) {
   try {
     await tg("editMessageText", {
       chat_id: chatId,
       message_id: messageId,
       text,
       link_preview_options: { is_disabled: true },
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
     });
   } catch (e) {
     // Xabarni tahrirlab bo'lmasa (o'chirilgan va h.k.), yangisini yuboramiz.
     if (e instanceof TelegramError && /not modified/.test(e.message)) return;
-    await sendMessage(chatId, text);
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text,
+      link_preview_options: { is_disabled: true },
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    });
   }
 }
 
-export async function sendTextDocument(chatId: number, filename: string, content: string, caption: string, replyTo?: number) {
+/** Tugmalarni olib tashlaydi (matnga tegmaydi). */
+export function removeKeyboard(chatId: number, messageId: number) {
+  return tg("editMessageReplyMarkup", { chat_id: chatId, message_id: messageId }).catch(() => {});
+}
+
+export function answerCallback(id: string, text?: string) {
+  return tg("answerCallbackQuery", { callback_query_id: id, ...(text ? { text } : {}) }).catch(() => {});
+}
+
+export async function sendTextDocument(
+  chatId: number,
+  filename: string,
+  content: string,
+  caption: string,
+  replyTo?: number,
+  mime = "text/plain;charset=utf-8",
+) {
   const form = new FormData();
   form.append("chat_id", String(chatId));
   form.append("caption", caption);
   if (replyTo) {
     form.append("reply_parameters", JSON.stringify({ message_id: replyTo, allow_sending_without_reply: true }));
   }
-  form.append("document", new Blob([content], { type: "text/plain;charset=utf-8" }), filename);
+  form.append("document", new Blob([content], { type: mime }), filename);
   const res = await fetch(`${API}/sendDocument`, { method: "POST", body: form });
   const data = await res.json().catch(() => ({}));
   if (!data.ok) throw new TelegramError("sendDocument", data.error_code ?? res.status, data.description ?? "unknown");

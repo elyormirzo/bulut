@@ -27,6 +27,48 @@ Rules:
 - Ignore music and background noise.
 - If there is no human speech at all, output exactly: ${NO_SPEECH}`;
 
+const SEGMENTS_PROMPT = `You are a professional subtitle editor. Transcribe ALL speech in this recording verbatim and split it into subtitle segments with accurate timestamps.
+
+Rules:
+- The speech is mostly Uzbek. Write Uzbek in the modern Latin alphabet with standard orthography: use oʻ, gʻ (with ʻ) and ’ for the tutuq belgisi.
+- If the speaker switches to Russian, English or another language, write those parts in that language as spoken (Russian in Cyrillic). Do not translate.
+- Each segment: one short sentence or phrase, at most 84 characters and at most 7 seconds long. Never merge long passages into one segment.
+- "start" and "end" are the times in the recording when the segment is spoken, formatted MM:SS.mmm (for example 01:15.250). Segments must be in order and must not overlap.
+- Add normal punctuation and capitalization. No speaker labels, notes or commentary.
+- Do not invent words. Write an unclear fragment as (tushunarsiz). Ignore music and background noise.
+- If there is no human speech at all, return an empty array.`;
+
+const SEGMENTS_SCHEMA = {
+  type: "ARRAY",
+  items: {
+    type: "OBJECT",
+    properties: {
+      start: { type: "STRING" },
+      end: { type: "STRING" },
+      text: { type: "STRING" },
+    },
+    required: ["start", "end", "text"],
+    propertyOrdering: ["start", "end", "text"],
+  },
+};
+
+const SUMMARY_PROMPT = `Quyida audio/video yozuvning toʻliq matni berilgan. Uning qisqa mazmunini oʻzbek tilida (lotin yozuvida) yoz.
+
+Format (aynan shunday, Markdown belgilarisiz):
+Asosiy fikr: <1–2 gapda yozuv nima haqida>
+
+Muhim nuqtalar:
+• <nuqta>
+• <nuqta>
+
+Qoidalar:
+- 3–7 ta nuqta; matn qisqa boʻlsa kamroq. Har bir nuqta bitta qisqa gap.
+- Agar matnda topshiriq, kelishuv, sana, summa yoki ism boʻlsa — ularni albatta kirit.
+- Faqat matnda bor narsani yoz, oʻzingdan qoʻshma. Matn rus yoki boshqa tilda boʻlsa ham xulosani oʻzbekcha yoz.
+
+Matn:
+`;
+
 /** Gemini limiti yoki vaqtincha band — foydalanuvchiga "navbat ko'p" deyiladi. */
 export class BusyError extends Error {}
 
@@ -36,15 +78,18 @@ export class TimeoutError extends BusyError {}
 class ModelNotFound extends Error {}
 
 export interface Transcript {
-  text: string;
+  text: string; // mode "text": tayyor matn; mode "segments": JSON massiv (string)
   model: string;
 }
+
+export type Mode = "text" | "segments";
 
 export async function transcribe(
   bytes: Uint8Array,
   mimeType: string,
   isVideo: boolean,
   deadline: number, // Date.now() bo'yicha: shu vaqtgacha javob bo'lmasa, to'xtatamiz
+  mode: Mode = "text",
 ): Promise<Transcript> {
   let uploaded: { name: string; uri: string } | null = null;
   try {
@@ -55,25 +100,11 @@ export async function transcribe(
       uploaded = await uploadFile(bytes, mimeType);
       media = { fileData: { mimeType, fileUri: uploaded.uri } };
     }
-    const parts = [media, { text: PROMPT }];
-
-    let lastErr: unknown;
-    let anyBusy = false;
-    for (const model of MODELS) {
-      try {
-        if (deadline - Date.now() < 10_000) break;
-        return { text: await generate(model, parts, isVideo, deadline), model };
-      } catch (e) {
-        if (e instanceof TimeoutError) throw e;
-        if (e instanceof BusyError) { anyBusy = true; lastErr = e; console.warn(`${model} band:`, String(e).slice(0, 200)); continue; }
-        if (e instanceof ModelNotFound) { lastErr = e; console.warn(`${model} topilmadi:`, e.message); continue; }
-        throw e;
-      }
-    }
-    if (anyBusy || deadline - Date.now() < 10_000) {
-      throw lastErr instanceof BusyError ? lastErr : new BusyError(String(lastErr ?? "vaqt tugadi"));
-    }
-    throw lastErr ?? new Error("Gemini modeli topilmadi");
+    const parts = [media, { text: mode === "segments" ? SEGMENTS_PROMPT : PROMPT }];
+    const extra: Record<string, unknown> = mode === "segments"
+      ? { responseMimeType: "application/json", responseSchema: SEGMENTS_SCHEMA }
+      : {};
+    return await runModels(parts, isVideo, deadline, extra);
   } finally {
     if (uploaded) {
       fetch(`${BASE}/v1beta/${uploaded.name}`, { method: "DELETE", headers: { "x-goog-api-key": KEY } })
@@ -83,8 +114,45 @@ export async function transcribe(
   }
 }
 
-async function generate(model: string, parts: unknown[], isVideo: boolean, deadline: number): Promise<string> {
-  const generationConfig: Record<string, unknown> = { temperature: 0, maxOutputTokens: 32768 };
+/** Tayyor matndan qisqa xulosa (audio qayta yuborilmaydi — tez va arzon). */
+export function summarize(transcript: string, deadline: number): Promise<Transcript> {
+  return runModels([{ text: SUMMARY_PROMPT + transcript }], false, deadline, { temperature: 0.2, maxOutputTokens: 2048 });
+}
+
+/** Modellarni navbat bilan sinaydi: band (503/429) yoki topilmasa keyingisiga o'tadi. */
+async function runModels(
+  parts: unknown[],
+  isVideo: boolean,
+  deadline: number,
+  extra: Record<string, unknown>,
+): Promise<Transcript> {
+  let lastErr: unknown;
+  let anyBusy = false;
+  for (const model of MODELS) {
+    try {
+      if (deadline - Date.now() < 10_000) break;
+      return { text: await generate(model, parts, isVideo, deadline, extra), model };
+    } catch (e) {
+      if (e instanceof TimeoutError) throw e;
+      if (e instanceof BusyError) { anyBusy = true; lastErr = e; console.warn(`${model} band:`, String(e).slice(0, 200)); continue; }
+      if (e instanceof ModelNotFound) { lastErr = e; console.warn(`${model} topilmadi:`, e.message); continue; }
+      throw e;
+    }
+  }
+  if (anyBusy || deadline - Date.now() < 10_000) {
+    throw lastErr instanceof BusyError ? lastErr : new BusyError(String(lastErr ?? "vaqt tugadi"));
+  }
+  throw lastErr ?? new Error("Gemini modeli topilmadi");
+}
+
+async function generate(
+  model: string,
+  parts: unknown[],
+  isVideo: boolean,
+  deadline: number,
+  extra: Record<string, unknown> = {},
+): Promise<string> {
+  const generationConfig: Record<string, unknown> = { temperature: 0, maxOutputTokens: 32768, ...extra };
   if (isVideo) generationConfig.mediaResolution = "MEDIA_RESOLUTION_LOW";
   // "O'ylash"ni minimal qilamiz: transkripsiya uchun keraksiz va juda sekinlashtiradi.
   if (model.startsWith("gemini-2.5")) generationConfig.thinkingConfig = { thinkingBudget: 0 };

@@ -63,4 +63,25 @@ export const T = {
   longAsFile: `📄 Matn uzun bo'lgani uchun fayl qilib yubordim.`,
 
   fileCaption: `MatnQil — Bulut · @matnqil_bot`,
+
+  tsButton: `⏱ Vaqt belgilari va .srt`,
+  sumButton: `📝 Qisqa xulosa`,
+  sumProcessing: `⏳ Qisqa xulosa tayyorlanmoqda…`,
+  sumHeader: `📝 Qisqa xulosa`,
+  sumAlready: `Bu yozuvning xulosasi allaqachon tayyorlangan yoki tayyorlanmoqda.`,
+  sumFailed: `😔 Xulosani tayyorlab bo'lmadi. Tugmani birozdan keyin qayta bosib ko'ring.`,
+  tsProcessing: `⏳ Vaqt belgilari va subtitr tayyorlanmoqda…`,
+  tsStarted: `Tayyorlanmoqda…`,
+  tsAlready: `Bu yozuv uchun subtitr allaqachon tayyorlangan yoki tayyorlanmoqda.`,
+  tsNotFound: `Bu yozuv topilmadi. Faylni qaytadan yuboring.`,
+  tsHeader: `⏱ Vaqt belgilari bilan:`,
+  srtCaption:
+    `🎬 Subtitr fayli (.srt).\n` +
+    `Videoga qo'shish: video muharririda (CapCut, Premiere, VLC…) "Subtitr qo'shish" orqali shu faylni tanlang.\n\n` +
+    `MatnQil — Bulut · @matnqil_bot`,
+  tsNoSpeech: `🤔 Vaqt belgilari uchun nutq topilmadi.`,
+  tsFailed:
+    `😔 Subtitrni tayyorlab bo'lmadi. Tugmani birozdan keyin qayta bosib ko'ring.`,
+  tsBusy:
+    `🙏 Hozir navbat ko'p. Tugmani birozdan keyin qayta bosib ko'ring.`,
 };
