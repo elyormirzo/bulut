@@ -14,6 +14,7 @@ import {
   inlineKeyboard,
   MAX_DOWNLOAD_BYTES,
   MAX_MESSAGE,
+  internalSecret,
   safeEqual,
   sendMessage,
   sendTextDocument,
@@ -21,11 +22,28 @@ import {
   tg,
   webhookSecret,
 } from "./telegram.ts";
-import { BusyError, diagnose, diagnoseYoutube, NO_SPEECH, type Script, summarize, TimeoutError, transcribe } from "./gemini.ts";
-import { parseSegments, toPlainText, toSrt, toTimestampedText } from "./subtitles.ts";
+import {
+  BusyError,
+  deleteGeminiFile,
+  diagnose,
+  diagnoseYoutube,
+  diagnoseYoutubeClip,
+  NO_SPEECH,
+  type Script,
+  summarize,
+  TimeoutError,
+  transcribe,
+  uploadToGemini,
+} from "./gemini.ts";
+import { parseSegments, type Segment, toPlainText, toSrt, toTimestampedText } from "./subtitles.ts";
 
 const DAILY_LIMIT = Number(Deno.env.get("DAILY_LIMIT") ?? 20);
-const MAX_DURATION_SEC = Number(Deno.env.get("MAX_DURATION_SEC") ?? 20 * 60);
+// Bo'laklab ishlash tufayli uzun yozuvlar ham qabul qilinadi (fayl baribir 20 MB gacha).
+const MAX_DURATION_SEC = Number(Deno.env.get("MAX_DURATION_SEC") ?? 3 * 60 * 60);
+// Shundan uzun yozuv (yoki davomiyligi noma'lum YouTube) bo'laklab ishlanadi.
+const LONG_SEC = Number(Deno.env.get("LONG_SEC") ?? 9 * 60);
+// Bitta qism uzunligi (soniya): bir chaqiruvda ~2,5 daqiqaga sig'ishi kerak.
+const CHUNK_SEC = Number(Deno.env.get("CHUNK_SEC") ?? 8 * 60);
 const MAX_INLINE_CHUNKS = 3; // bundan uzun matn .txt fayl bo'lib boradi
 // Supabase bepul tarifida funksiya ~150 s ishlaydi; javobni yuborishga vaqt qoldiramiz.
 const GEMINI_BUDGET_MS = Number(Deno.env.get("GEMINI_BUDGET_MS") ?? 115_000);
@@ -60,9 +78,21 @@ Deno.serve(async (req) => {
   if (req.method === "GET" && url.searchParams.has("diag")) {
     // vaqtinchalik: qaysi Gemini modellari ishlashini va YouTube o'qilishini ko'rish uchun
     const yt = url.searchParams.get("yt");
+    const from = url.searchParams.get("from");
+    if (yt && from) return json(await diagnoseYoutubeClip(yt, Number(from), Number(url.searchParams.get("to"))));
     return json(yt ? await diagnoseYoutube(yt) : await diagnose(url.searchParams.get("m")?.split(",")));
   }
   if (req.method !== "POST") return new Response("MatnQil — Bulut", { status: 200 });
+
+  // Uzun yozuvning navbatdagi qismi: funksiya o'zini-o'zi chaqiradi (har chaqiruvga yangi vaqt).
+  if (url.searchParams.has("step")) {
+    if (!safeEqual(req.headers.get("x-internal-secret") ?? "", await internalSecret())) {
+      return new Response("forbidden", { status: 401 });
+    }
+    const id = Number(url.searchParams.get("step"));
+    EdgeRuntime.waitUntil(runStep(id).catch((e) => console.error(`step ${id}`, e)));
+    return new Response("ok");
+  }
 
   const got = req.headers.get("x-telegram-bot-api-secret-token") ?? "";
   if (!safeEqual(got, await webhookSecret())) return new Response("forbidden", { status: 401 });
@@ -170,6 +200,11 @@ async function handleMessage(updateId: number, msg: Msg) {
   const status = await sendMessage(chatId, media.url ? T.processingYt : T.processing, msg.message_id);
   tg("sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => {});
 
+  // Uzun yozuv (yoki YouTube) — bo'laklab, navbat bilan.
+  if (media.url || (media.duration ?? 0) > LONG_SEC) {
+    return await startLongJob(requestId, chatId, status.message_id, media, script);
+  }
+
   try {
     const bytes = media.url ? { url: media.url } : await downloadFile(media.fileId);
     if (bytes instanceof Uint8Array && bytes.length > MAX_DOWNLOAD_BYTES) {
@@ -225,6 +260,145 @@ function youtubeUrl(text: string | undefined): string | null {
     /(?:https?:\/\/)?(?:www\.|m\.|music\.)?(?:youtube\.com\/(?:watch\?(?:[^\s#]*&)?v=|shorts\/|live\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/,
   );
   return m ? `https://www.youtube.com/watch?v=${m[1]}` : null;
+}
+
+// ───────────────────────── Uzun yozuvlar: bo'laklab ishlash ─────────────────────────
+
+interface Job {
+  src: { uri: string; mimeType?: string; geminiName?: string }; // YouTube havolasi yoki Gemini Files API fayli
+  isVideo: boolean;
+  kind: "video" | "audio";
+  script: Script;
+  duration: number | null; // noma'lum bo'lsa (YouTube) — bo'sh qism kelguncha davom etamiz
+  next: number; // navbatdagi qism boshlanishi (soniya)
+  parts: number;
+  attempts: number;
+  statusId: number;
+}
+
+const MAX_JOB_SEC = 3 * 60 * 60; // xavfsizlik chegarasi
+const MAX_ATTEMPTS = 3;
+
+async function startLongJob(requestId: number, chatId: number, statusId: number, media: Media, script: Script) {
+  try {
+    let src: Job["src"];
+    if (media.url) {
+      src = { uri: media.url };
+    } else {
+      // Faylni Gemini'ga bir marta yuklaymiz — keyingi qismlar shu nusxadan o'qiydi.
+      const bytes = await downloadFile(media.fileId);
+      const up = await uploadToGemini(bytes, media.mimeType);
+      src = { uri: up.uri, mimeType: media.mimeType, geminiName: up.name };
+    }
+    const job: Job = {
+      src, isVideo: media.isVideo, kind: media.isVideo ? "video" : "audio", script,
+      duration: media.duration ?? null, next: 0, parts: 0, attempts: 0, statusId,
+    };
+    await db.from("requests").update({
+      job, segments: [], file_id: media.url ? null : media.fileId, source_url: media.url ?? null,
+    }).eq("id", requestId);
+    await editMessage(chatId, statusId, T.longStart(media.duration ? Math.ceil(media.duration / CHUNK_SEC) : null));
+    await triggerStep(requestId);
+  } catch (e) {
+    console.error(`long ${requestId}`, e);
+    const busy = e instanceof BusyError;
+    await editMessage(chatId, statusId, media.url ? (busy ? T.busy : T.ytFailed) : (busy ? T.busy : T.failed)).catch(() => {});
+    await finish(requestId, busy ? "quota" : "failed", { error: String(e).slice(0, 1000) });
+  }
+}
+
+async function triggerStep(id: number, delayMs = 0) {
+  if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/telegram-webhook?step=${id}`, {
+    method: "POST",
+    headers: { "x-internal-secret": await internalSecret() },
+  });
+  await res.body?.cancel();
+  if (!res.ok) throw new Error(`step trigger ${res.status}`);
+}
+
+async function runStep(id: number) {
+  const { data: req, error } = await db.from("requests")
+    .select("id, status, chat_id, message_id, job, segments").eq("id", id).maybeSingle();
+  if (error) throw error;
+  if (!req || req.status !== "processing" || !req.job) return;
+  const job = req.job as Job;
+  const all: Segment[] = req.segments ?? [];
+  const clip = { start: job.next, end: job.next + CHUNK_SEC };
+  if (job.duration) clip.end = Math.min(clip.end, job.duration + 1);
+
+  let segs: Segment[] | null = null;
+  try {
+    const r = await transcribe({ url: job.src.uri, mimeType: job.src.mimeType }, job.src.mimeType ?? "video/*",
+      job.isVideo, Date.now() + GEMINI_BUDGET_MS, "segments", job.script, clip);
+    segs = parseSegments(r.text);
+    if (!segs) throw new Error(`Segment JSON buzuq: ${r.text.slice(0, 200)}`);
+    // Model vaqtni qism boshidan sanagan bo'lsa (00:00 dan), umumiy vaqtga o'tkazamiz.
+    if (clip.start > 0 && segs.length && segs[0].start < clip.start - 30) {
+      segs = segs.map((x) => ({ ...x, start: x.start + clip.start, end: x.end + clip.start }));
+    }
+    // Faqat shu qismga tegishlilari (qo'shni qism bilan takrorlanmasin).
+    segs = segs.filter((x) => x.start >= clip.start - 2 && x.start < clip.end + 2);
+  } catch (e) {
+    const known = (job.duration ?? 0) > 0;
+    // Davomiyligi noma'lum va kamida bitta qism tayyor bo'lsa — oxiriga yetdik deb hisoblaymiz.
+    if (!(e instanceof BusyError) && !known && job.parts > 0) {
+      return await finishJob(req, job, all);
+    }
+    job.attempts++;
+    console.warn(`step ${id}: qism ${clip.start}s xato (${job.attempts}/${MAX_ATTEMPTS}):`, String(e).slice(0, 200));
+    if (job.attempts <= MAX_ATTEMPTS) {
+      await db.from("requests").update({ job }).eq("id", id);
+      return await triggerStep(id, 20_000);
+    }
+    if (all.length) return await finishJob(req, job, all, true);
+    const busy = e instanceof BusyError;
+    await editMessage(req.chat_id, job.statusId, job.src.geminiName ? (busy ? T.busy : T.failed) : (busy ? T.busy : T.ytFailed))
+      .catch(() => {});
+    await cleanupJob(job);
+    return await finish(id, busy ? "quota" : "failed", { error: String(e).slice(0, 1000) });
+  }
+
+  all.push(...segs);
+  job.parts++;
+  job.attempts = 0;
+  job.next = clip.end;
+  const lastEnd = segs.length ? segs[segs.length - 1].end : 0;
+  const done = job.duration
+    ? job.next >= job.duration
+    : segs.length === 0 || lastEnd < clip.end - 45 || job.next >= MAX_JOB_SEC;
+
+  if (done || job.next >= MAX_JOB_SEC) return await finishJob(req, job, all);
+
+  await db.from("requests").update({ job, segments: all }).eq("id", id);
+  await editMessage(req.chat_id, job.statusId, T.longProgress(mmss(job.next), job.parts,
+    job.duration ? Math.ceil(job.duration / CHUNK_SEC) : null));
+  await triggerStep(id);
+}
+
+// deno-lint-ignore no-explicit-any
+async function finishJob(req: any, job: Job, all: Segment[], partial = false) {
+  await cleanupJob(job);
+  if (!all.length) {
+    await editMessage(req.chat_id, job.statusId, T.noSpeech);
+    return await finish(req.id, "no_speech", { job });
+  }
+  all.sort((a, b) => a.start - b.start);
+  const plain = toPlainText(all);
+  await finish(req.id, "done", { job, segments: all, transcript: plain, text_length: plain.length });
+  const body = toTimestampedText(all) + (partial ? `\n\n${T.longPartial(mmss(job.next))}` : "");
+  await deliver(req.chat_id, job.statusId, req.message_id, body, resultKeyboard(req.id, true, job.script));
+}
+
+async function cleanupJob(job: Job) {
+  if (job.src.geminiName) await deleteGeminiFile(job.src.geminiName);
+}
+
+function mmss(sec: number): string {
+  const t = Math.max(0, Math.floor(sec));
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return h ? `${h}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`;
 }
 
 /** Matnni yuboradi: kichik bo'lsa xabar(lar), katta bo'lsa .txt fayl. Tugma birinchi xabarga qo'yiladi. */

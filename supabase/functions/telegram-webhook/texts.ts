@@ -44,7 +44,7 @@ export const T = {
     `3. Matn shu yerga keladi. Uzun matn .txt fayl bo'lib keladi.\n\n` +
     `Cheklovlar:\n` +
     `• Fayl hajmi 20 MB gacha (Telegram botlarga shundan katta faylni yuklab olishga ruxsat bermaydi)\n` +
-    `• Davomiyligi ${maxMin} daqiqagacha\n` +
+    `• Uzun yozuvlar qismlarga bo'lib ishlanadi (${Math.round(maxMin / 60)} soatgacha)\n` +
     `• Kuniga ${limit} ta so'rov\n\n` +
     `Fayl katta bo'lsa, siqib yoki bo'laklarga bo'lib yuboring.\n\n` +
     `Buyruqlar:\n/start — boshlash\n/help — yordam\n/limit — bugungi limit\n/yozuv — kirill yoki lotin yozuvi`,
@@ -56,7 +56,14 @@ export const T = {
       : `Yana ${limit - used} ta so'rov qoldi.`),
 
   processing: `⏳ Matnga aylantirilmoqda…`,
-  processingYt: `⏳ YouTube videosi matnga aylantirilmoqda… Uzun video 1–2 daqiqa olishi mumkin.`,
+  processingYt: `⏳ YouTube videosi matnga aylantirilmoqda…`,
+  longStart: (parts: number | null) =>
+    `⏳ Uzun yozuv — qismlarga bo'lib matnga aylantirilmoqda` + (parts ? ` (${parts} qism)` : ``) + `.\n` +
+    `Har bir qism tayyor bo'lganda shu yerda ko'rsataman. Bir oz vaqt oladi.`,
+  longProgress: (upTo: string, done: number, total: number | null) =>
+    `⏳ Matnga aylantirilmoqda… ${upTo} gacha tayyor` + (total ? ` (${done}/${total} qism)` : ` (${done} qism)`) + `.`,
+  longPartial: (upTo: string) =>
+    `⚠️ Navbat ko'pligi sababli faqat ${upTo} gacha bo'lgan qism matnga aylantirildi.`,
   ytFailed:
     `😔 YouTube videosini o'qib bo'lmadi.\n` +
     `Video ochiq (public) ekanini tekshiring — yopiq, faqat havola orqali ko'rinadigan yoki yoshga cheklangan videolar ishlamaydi.\n` +

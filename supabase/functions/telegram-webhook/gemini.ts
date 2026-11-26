@@ -50,7 +50,28 @@ Rules:
 - If there is no human speech at all, output exactly: ${NO_SPEECH}`;
 }
 
-function segmentsPrompt(script: Script): string {
+/** Yozuvning bir qismi (soniya). */
+export interface Clip {
+  start: number;
+  end: number;
+}
+
+function mmss(sec: number): string {
+  const t = Math.max(0, Math.floor(sec));
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return h ? `${h}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`;
+}
+
+function clipRule(clip?: Clip): string {
+  if (!clip) return "";
+  return `
+- IMPORTANT: transcribe ONLY the speech between ${mmss(clip.start)} and ${mmss(clip.end)} of the recording; ignore everything before and after this range.
+- All "start"/"end" times must be ABSOLUTE positions in the full recording (the first segment starts at about ${mmss(clip.start)}, not at 00:00).
+- If there is no speech in this range (for example, the recording ends before ${mmss(clip.start)}), return an empty array.`;
+}
+
+function segmentsPrompt(script: Script, clip?: Clip): string {
   return `You are a professional subtitle editor. Transcribe ALL speech in this recording verbatim and split it into subtitle segments with accurate timestamps.
 
 Rules:
@@ -60,7 +81,7 @@ Rules:
 - "start" and "end" are the times in the recording when the segment is spoken, formatted MM:SS.mmm (for example 01:15.250). Segments must be in order and must not overlap.
 - Add normal punctuation and capitalization. No speaker labels, notes or commentary.
 - Do not invent words. Write an unclear fragment as ${unclear(script)}. Ignore music and background noise.
-- If there is no human speech at all, return an empty array.`;
+- If there is no human speech at all, return an empty array.${clipRule(clip)}`;
 }
 
 const SEGMENTS_SCHEMA = {
@@ -155,7 +176,7 @@ export interface Transcript {
 export type Mode = "text" | "segments";
 
 /** Kirish: fayl baytlari yoki YouTube havolasi (Gemini uni o'zi ochadi). */
-export type MediaInput = Uint8Array | { url: string };
+export type MediaInput = Uint8Array | { url: string; mimeType?: string };
 
 export async function transcribe(
   input: MediaInput,
@@ -164,19 +185,22 @@ export async function transcribe(
   deadline: number, // Date.now() bo'yicha: shu vaqtgacha javob bo'lmasa, to'xtatamiz
   mode: Mode = "text",
   script: Script = "cyrl",
+  clip?: Clip, // faqat shu qism (uzun yozuvlar bo'laklab ishlanganda)
 ): Promise<Transcript> {
   let uploaded: { name: string; uri: string } | null = null;
   try {
     let media: Record<string, unknown>;
     if (!(input instanceof Uint8Array)) {
-      media = { fileData: { fileUri: input.url } };
+      media = { fileData: { fileUri: input.url, ...(input.mimeType ? { mimeType: input.mimeType } : {}) } };
+      // Video uchun Gemini o'zi kesadi; audio uchun ko'rsatmadagi vaqt oralig'i yetarli.
+      if (clip && isVideo) media.videoMetadata = { startOffset: `${Math.floor(clip.start)}s`, endOffset: `${Math.ceil(clip.end)}s` };
     } else if (input.length <= INLINE_MAX_BYTES) {
       media = { inlineData: { mimeType, data: encodeBase64(input) } };
     } else {
       uploaded = await uploadFile(input, mimeType);
       media = { fileData: { mimeType, fileUri: uploaded.uri } };
     }
-    const parts = [media, { text: mode === "segments" ? segmentsPrompt(script) : textPrompt(script) }];
+    const parts = [media, { text: mode === "segments" ? segmentsPrompt(script, clip) : textPrompt(script) }];
     const extra: Record<string, unknown> = mode === "segments"
       ? { responseMimeType: "application/json", responseSchema: SEGMENTS_SCHEMA }
       : {};
@@ -377,6 +401,30 @@ export async function diagnoseYoutube(id: string) {
   try {
     const r = await transcribe({ url: `https://www.youtube.com/watch?v=${id}` }, "video/*", true, Date.now() + 60_000);
     return { ms: Date.now() - t0, model: r.model, text: r.text.slice(0, 300) };
+  } catch (e) {
+    return { ms: Date.now() - t0, error: String(e).slice(0, 400) };
+  }
+}
+
+/** Faylni Gemini'ga bir marta yuklaydi (uzun yozuvning hamma qismlari shu nusxadan foydalanadi; 48 soat saqlanadi). */
+export function uploadToGemini(bytes: Uint8Array, mimeType: string) {
+  return uploadFile(bytes, mimeType);
+}
+
+export async function deleteGeminiFile(name: string) {
+  await fetch(`${BASE}/v1beta/${name}`, { method: "DELETE", headers: { "x-goog-api-key": KEY } })
+    .then((r) => r.body?.cancel())
+    .catch(() => {});
+}
+
+/** Diagnostika: YouTube videosining bir qismini o'qish (vaqtinchalik). */
+export async function diagnoseYoutubeClip(id: string, start: number, end: number) {
+  if (!/^[A-Za-z0-9_-]{11}$/.test(id)) return { error: "id" };
+  const t0 = Date.now();
+  try {
+    const r = await transcribe({ url: `https://www.youtube.com/watch?v=${id}` }, "video/*", true, Date.now() + 100_000,
+      "segments", "latn", { start, end });
+    return { ms: Date.now() - t0, model: r.model, text: r.text.slice(0, 600) };
   } catch (e) {
     return { ms: Date.now() - t0, error: String(e).slice(0, 400) };
   }

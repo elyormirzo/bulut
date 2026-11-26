@@ -115,8 +115,7 @@ export function splitText(text: string, size = MAX_MESSAGE - 96): string[] {
   return chunks;
 }
 
-/** Webhook secret_token: bot tokenidan HMAC orqali hosil qilinadi, alohida secret kerak emas. */
-export async function webhookSecret(): Promise<string> {
+async function hmacHex(label: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(TOKEN),
@@ -124,8 +123,18 @@ export async function webhookSecret(): Promise<string> {
     false,
     ["sign"],
   );
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("bulut-telegram-webhook-v1"));
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(label));
   return Array.from(new Uint8Array(sig), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Webhook secret_token: bot tokenidan HMAC orqali hosil qilinadi, alohida secret kerak emas. */
+export function webhookSecret(): Promise<string> {
+  return hmacHex("bulut-telegram-webhook-v1");
+}
+
+/** Funksiya o'zini-o'zi chaqirishi (uzun yozuv qismlari) uchun ichki kalit. */
+export function internalSecret(): Promise<string> {
+  return hmacHex("bulut-internal-step-v1");
 }
 
 export function safeEqual(a: string, b: string): boolean {
