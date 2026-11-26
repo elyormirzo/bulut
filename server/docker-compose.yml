@@ -1,0 +1,39 @@
+# MatnQil — Bulut: 2 GB gacha fayllar uchun server (Local Telegram Bot API + ovoz ajratuvchi).
+services:
+  bot-api:
+    image: aiogram/telegram-bot-api:latest
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: "1"
+    volumes:
+      - bot-data:/var/lib/telegram-bot-api
+
+  worker:
+    build: ./worker
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+    volumes:
+      - bot-data:/var/lib/telegram-bot-api
+      - audio:/audio
+
+  caddy:
+    image: caddy:2.8.4
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  bot-data:
+  audio:
+  caddy-data:
+  caddy-config:

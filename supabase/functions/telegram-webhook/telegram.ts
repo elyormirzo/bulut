@@ -1,10 +1,15 @@
 // Telegram Bot API uchun yupqa yordamchi funksiyalar.
 
 const TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "";
-const API = `https://api.telegram.org/bot${TOKEN}`;
+// O'z serverimiz (Local Bot API, 2 GB gacha fayl) ulangan bo'lsa, so'rovlar o'sha orqali boradi.
+const API_BASE = (Deno.env.get("TELEGRAM_API_BASE") || "https://api.telegram.org").replace(/\/+$/, "");
+const API = `${API_BASE}/bot${TOKEN}`;
+/** VPS'dagi yordamchi xizmat (ovoz ajratish); bo'sh bo'lsa — oddiy (bulutli) Bot API rejimi. */
+export const WORKER_URL = (Deno.env.get("WORKER_URL") ?? "").replace(/\/+$/, "");
 
 export const MAX_MESSAGE = 4096;
-export const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024; // Bot API getFile cheklovi
+export const CLOUD_MAX_BYTES = 20 * 1024 * 1024; // oddiy Bot API getFile cheklovi
+export const MAX_DOWNLOAD_BYTES = WORKER_URL ? 2000 * 1024 * 1024 : CLOUD_MAX_BYTES;
 
 export class TelegramError extends Error {
   constructor(public method: string, public code: number, description: string) {
@@ -93,6 +98,14 @@ export async function sendTextDocument(
 }
 
 export async function downloadFile(fileId: string): Promise<Uint8Array> {
+  if (WORKER_URL) {
+    // Local Bot API faylni VPS diskida saqlaydi — yordamchi xizmat orqali olamiz.
+    const res = await fetch(`${WORKER_URL}/file?file_id=${encodeURIComponent(fileId)}`, {
+      headers: { "x-bulut-key": await workerKey() },
+    });
+    if (!res.ok) throw new Error(`Faylni yuklab bo'lmadi (worker): ${res.status} ${(await res.text()).slice(0, 200)}`);
+    return new Uint8Array(await res.arrayBuffer());
+  }
   const file = await tg<{ file_path?: string; file_size?: number }>("getFile", { file_id: fileId });
   if (!file.file_path) throw new Error("getFile: file_path yo'q");
   const res = await fetch(`https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`);
@@ -135,6 +148,11 @@ export function webhookSecret(): Promise<string> {
 /** Funksiya o'zini-o'zi chaqirishi (uzun yozuv qismlari) uchun ichki kalit. */
 export function internalSecret(): Promise<string> {
   return hmacHex("bulut-internal-step-v1");
+}
+
+/** VPS'dagi yordamchi xizmat kaliti (u ham bot tokenidan xuddi shunday hisoblaydi). */
+export function workerKey(): Promise<string> {
+  return hmacHex("bulut-worker-v1");
 }
 
 export function safeEqual(a: string, b: string): boolean {

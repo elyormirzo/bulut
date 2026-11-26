@@ -1,0 +1,9 @@
+# HTTPS sertifikati avtomatik olinadi (Let's Encrypt).
+{$DOMAIN} {
+	handle_path /worker/* {
+		reverse_proxy worker:8090
+	}
+	handle {
+		reverse_proxy bot-api:8081
+	}
+}

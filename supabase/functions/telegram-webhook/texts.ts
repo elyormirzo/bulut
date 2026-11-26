@@ -22,8 +22,12 @@ export function isScript(v: unknown): v is Script {
   return v === "cyrl" || v === "latn";
 }
 
+function sizeText(mb: number) {
+  return mb >= 1000 ? `${Math.round(mb / 1000)} GB` : `${mb} MB`;
+}
+
 export const T = {
-  start: (name: string, limit: number) =>
+  start: (name: string, limit: number, maxMb: number) =>
     `Assalomu alaykum, ${name}! 👋\n\n` +
     `Men MatnQil — Bulut botiman. O'zbekcha nutqni matnga aylantiraman.\n\n` +
     `Menga yuboring:\n` +
@@ -33,17 +37,17 @@ export const T = {
     `🎬 video fayl\n` +
     `🔗 YouTube havolasi\n\n` +
     `Men esa uni matn qilib qaytaraman.\n\n` +
-    `Cheklovlar: fayl 20 MB gacha, kuniga ${limit} ta so'rov.\n` +
+    `Cheklovlar: fayl ${sizeText(maxMb)} gacha, kuniga ${limit} ta so'rov.\n` +
     `Yordam: /help`,
 
-  help: (limit: number, maxMin: number) =>
+  help: (limit: number, maxMin: number, maxMb: number) =>
     `ℹ️ Qanday ishlatiladi\n\n` +
     `1. Ovozli xabar, video-doira, audio yoki video yuboring (boshqa chatdan forward qilsangiz ham bo'ladi) ` +
     `yoki YouTube havolasini tashlang.\n` +
     `2. Bir necha soniya kuting.\n` +
     `3. Matn shu yerga keladi. Uzun matn .txt fayl bo'lib keladi.\n\n` +
     `Cheklovlar:\n` +
-    `• Fayl hajmi 20 MB gacha (Telegram botlarga shundan katta faylni yuklab olishga ruxsat bermaydi)\n` +
+    `• Fayl hajmi ${sizeText(maxMb)} gacha\n` +
     `• Uzun yozuvlar qismlarga bo'lib ishlanadi (${Math.round(maxMin / 60)} soatgacha)\n` +
     `• Kuniga ${limit} ta so'rov\n\n` +
     `Fayl katta bo'lsa, siqib yoki bo'laklarga bo'lib yuboring.\n\n` +
@@ -73,10 +77,13 @@ export const T = {
     `Hozircha 15–20 daqiqagacha bo'lgan videolar ishonchli ishlaydi. Birozdan keyin yana urinib ko'ring.\n` +
     `(Bu so'rov limitingizdan yechilmadi.)`,
 
-  tooBig: (mb: string) =>
+  tooBig: (mb: string, maxMb: number) =>
     `😔 Fayl juda katta (${mb} MB).\n\n` +
-    `Telegram botlarga faqat 20 MB gacha bo'lgan faylni yuklab olishga ruxsat beradi. ` +
+    `Hozircha ${sizeText(maxMb)} gacha bo'lgan faylni qabul qilaman. ` +
     `Faylni siqib yoki bo'laklarga bo'lib yuboring.`,
+  bigPrepare: (mb: string) =>
+    `⏳ Katta fayl (${mb} MB) qabul qilindi. Avval yuklab olinib, ovozi ajratilmoqda…\n` +
+    `Bu bir necha daqiqa olishi mumkin, keyin matnga aylantirish boshlanadi.`,
 
   tooLong: (maxMin: number) =>
     `😔 Yozuv juda uzun. Hozircha ${maxMin} daqiqagacha bo'lgan yozuvni qabul qilaman. ` +

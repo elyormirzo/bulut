@@ -9,6 +9,7 @@ import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { isScript, T, TS } from "./texts.ts";
 import {
   answerCallback,
+  CLOUD_MAX_BYTES,
   downloadFile,
   editMessage,
   inlineKeyboard,
@@ -35,6 +36,7 @@ import {
   transcribe,
   uploadToGemini,
 } from "./gemini.ts";
+import { downloadAudio, prepareAudio } from "./worker.ts";
 import { parseSegments, type Segment, toPlainText, toSrt, toTimestampedText } from "./subtitles.ts";
 
 const DAILY_LIMIT = Number(Deno.env.get("DAILY_LIMIT") ?? 20);
@@ -143,10 +145,10 @@ async function handleMessage(updateId: number, msg: Msg) {
   const command = typeof msg.text === "string" ? msg.text.trim().split(/[\s@]/)[0].toLowerCase() : "";
   if (command === "/start") {
     await upsertUser(msg.from);
-    return void await sendMessage(chatId, T.start(msg.from.first_name ?? "do'stim", DAILY_LIMIT));
+    return void await sendMessage(chatId, T.start(msg.from.first_name ?? "do'stim", DAILY_LIMIT, maxMb()));
   }
   if (command === "/help") {
-    return void await sendMessage(chatId, T.help(DAILY_LIMIT, Math.round(MAX_DURATION_SEC / 60)));
+    return void await sendMessage(chatId, T.help(DAILY_LIMIT, Math.round(MAX_DURATION_SEC / 60), maxMb()));
   }
   if (command === "/limit") {
     const { data, error } = await db.rpc("daily_usage", { p_telegram_id: msg.from.id });
@@ -171,7 +173,7 @@ async function handleMessage(updateId: number, msg: Msg) {
   if (!media) return void await sendMessage(chatId, T.unsupported);
 
   if (media.fileSize && media.fileSize > MAX_DOWNLOAD_BYTES) {
-    return void await sendMessage(chatId, T.tooBig((media.fileSize / 1024 / 1024).toFixed(1)), msg.message_id);
+    return void await sendMessage(chatId, T.tooBig((media.fileSize / 1024 / 1024).toFixed(1), maxMb()), msg.message_id);
   }
   if (media.duration && media.duration > MAX_DURATION_SEC) {
     return void await sendMessage(chatId, T.tooLong(Math.round(MAX_DURATION_SEC / 60)), msg.message_id);
@@ -201,14 +203,14 @@ async function handleMessage(updateId: number, msg: Msg) {
   tg("sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => {});
 
   // Uzun yozuv (yoki YouTube) — bo'laklab, navbat bilan.
-  if (media.url || (media.duration ?? 0) > LONG_SEC) {
+  if (media.url || (media.duration ?? 0) > LONG_SEC || (media.fileSize ?? 0) > CLOUD_MAX_BYTES) {
     return await startLongJob(requestId, chatId, status.message_id, media, script);
   }
 
   try {
     const bytes = media.url ? { url: media.url } : await downloadFile(media.fileId);
     if (bytes instanceof Uint8Array && bytes.length > MAX_DOWNLOAD_BYTES) {
-      await editMessage(chatId, status.message_id, T.tooBig((bytes.length / 1024 / 1024).toFixed(1)));
+      await editMessage(chatId, status.message_id, T.tooBig((bytes.length / 1024 / 1024).toFixed(1), maxMb()));
       return await finish(requestId, "failed", { error: "too_big" });
     }
     // YouTube uchun Telegram file_id yo'q; havolani saqlaymiz.
@@ -274,6 +276,12 @@ interface Job {
   parts: number;
   attempts: number;
   statusId: number;
+  // Katta fayl (20 MB dan ortiq): avval VPS ovozini ajratadi, keyin qismlarga bo'linadi.
+  prepare?: { fileId: string; tries: number };
+}
+
+function maxMb() {
+  return Math.round(MAX_DOWNLOAD_BYTES / 1024 / 1024);
 }
 
 const MAX_JOB_SEC = 3 * 60 * 60; // xavfsizlik chegarasi
@@ -282,8 +290,12 @@ const MAX_ATTEMPTS = 3;
 async function startLongJob(requestId: number, chatId: number, statusId: number, media: Media, script: Script) {
   try {
     let src: Job["src"];
+    let prepare: Job["prepare"];
     if (media.url) {
       src = { uri: media.url };
+    } else if ((media.fileSize ?? 0) > CLOUD_MAX_BYTES) {
+      src = { uri: "" }; // VPS ovozni ajratgandan keyin to'ldiriladi
+      prepare = { fileId: media.fileId, tries: 0 };
     } else {
       // Faylni Gemini'ga bir marta yuklaymiz — keyingi qismlar shu nusxadan o'qiydi.
       const bytes = await downloadFile(media.fileId);
@@ -292,12 +304,14 @@ async function startLongJob(requestId: number, chatId: number, statusId: number,
     }
     const job: Job = {
       src, isVideo: media.isVideo, kind: media.isVideo ? "video" : "audio", script,
-      duration: media.duration ?? null, next: 0, parts: 0, attempts: 0, statusId,
+      duration: media.duration ?? null, next: 0, parts: 0, attempts: 0, statusId, ...(prepare ? { prepare } : {}),
     };
     await db.from("requests").update({
       job, segments: [], file_id: media.url ? null : media.fileId, source_url: media.url ?? null,
     }).eq("id", requestId);
-    await editMessage(chatId, statusId, T.longStart(media.duration ? Math.ceil(media.duration / CHUNK_SEC) : null));
+    await editMessage(chatId, statusId, prepare
+      ? T.bigPrepare((media.fileSize! / 1024 / 1024).toFixed(0))
+      : T.longStart(media.duration ? Math.ceil(media.duration / CHUNK_SEC) : null));
     await triggerStep(requestId);
   } catch (e) {
     console.error(`long ${requestId}`, e);
@@ -323,6 +337,7 @@ async function runStep(id: number) {
   if (error) throw error;
   if (!req || req.status !== "processing" || !req.job) return;
   const job = req.job as Job;
+  if (job.prepare) return await prepareStep(req, job);
   const all: Segment[] = req.segments ?? [];
   const clip = { start: job.next, end: job.next + CHUNK_SEC };
   if (job.duration) clip.end = Math.min(clip.end, job.duration + 1);
@@ -374,6 +389,50 @@ async function runStep(id: number) {
   await editMessage(req.chat_id, job.statusId, T.longProgress(mmss(job.next), job.parts,
     job.duration ? Math.ceil(job.duration / CHUNK_SEC) : null));
   await triggerStep(id);
+}
+
+const MAX_PREPARE_TRIES = 45; // ~1 soat (har urinish ~60 s kutadi)
+
+/** Katta fayl: VPS faylni Telegram'dan oladi va ovozini ajratadi; tayyor bo'lgach Gemini'ga yuklaymiz. */
+// deno-lint-ignore no-explicit-any
+async function prepareStep(req: any, job: Job) {
+  const p = job.prepare!;
+  let r;
+  try {
+    r = await prepareAudio(p.fileId);
+  } catch (e) {
+    console.warn(`prepare ${req.id}:`, String(e).slice(0, 200));
+    r = { status: "pending" as const };
+  }
+  if (r.status === "pending") {
+    p.tries++;
+    if (p.tries > MAX_PREPARE_TRIES) r = { status: "error" as const, error: "vaqt tugadi" };
+    else {
+      await db.from("requests").update({ job }).eq("id", req.id);
+      return await triggerStep(req.id, 3_000);
+    }
+  }
+  if (r.status === "error") {
+    console.error(`prepare ${req.id}: ${r.error}`);
+    await editMessage(req.chat_id, job.statusId, T.failed).catch(() => {});
+    return await finish(req.id, "failed", { error: `prepare: ${r.error}`.slice(0, 1000) });
+  }
+  try {
+    const bytes = await downloadAudio(r.id);
+    const up = await uploadToGemini(bytes, "audio/ogg");
+    job.src = { uri: up.uri, mimeType: "audio/ogg", geminiName: up.name };
+    job.isVideo = false; // endi faqat ovoz (annotatsiyada «Videomaterialda» so'zi saqlanadi)
+    if (r.duration) job.duration = r.duration;
+    delete job.prepare;
+    await db.from("requests").update({ job }).eq("id", req.id);
+    await editMessage(req.chat_id, job.statusId, T.longStart(job.duration ? Math.ceil(job.duration / CHUNK_SEC) : null));
+    await triggerStep(req.id);
+  } catch (e) {
+    console.error(`prepare ${req.id} upload`, e);
+    const busy = e instanceof BusyError;
+    await editMessage(req.chat_id, job.statusId, busy ? T.busy : T.failed).catch(() => {});
+    await finish(req.id, busy ? "quota" : "failed", { error: String(e).slice(0, 1000) });
+  }
 }
 
 // deno-lint-ignore no-explicit-any
