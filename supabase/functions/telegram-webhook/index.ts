@@ -37,6 +37,7 @@ import {
   uploadToGemini,
 } from "./gemini.ts";
 import { downloadAudio, prepareAudio } from "./worker.ts";
+import { toCyrillic } from "./translit.ts";
 import { parseSegments, type Segment, toPlainText, toSrt, toTimestampedText } from "./subtitles.ts";
 
 const DAILY_LIMIT = Number(Deno.env.get("DAILY_LIMIT") ?? 20);
@@ -218,7 +219,7 @@ async function handleMessage(updateId: number, msg: Msg) {
 
     // Asosiy yo'l: vaqt belgili bo'laklar (bitta so'rov) -> [00:15] matn; .srt keyin shu bo'laklardan.
     const first = await transcribe(bytes, media.mimeType, media.isVideo, deadline, "segments", script);
-    const segs = parseSegments(first.text, media.duration);
+    const segs = fixSegs(parseSegments(first.text, media.duration), script);
 
     if (segs && segs.length === 0) {
       await editMessage(chatId, status.message_id, T.noSpeech);
@@ -237,7 +238,9 @@ async function handleMessage(updateId: number, msg: Msg) {
 
     // Zaxira: JSON buzuq kelsa, oddiy matn rejimida qayta so'raymiz (vaqt belgilarisiz).
     console.warn(`request ${requestId}: segment JSON buzuq, oddiy matnga o'tildi`);
-    const { text, model } = await transcribe(bytes, media.mimeType, media.isVideo, deadline, "text", script);
+    const r2 = await transcribe(bytes, media.mimeType, media.isVideo, deadline, "text", script);
+    const { model } = r2;
+    const text = script === "cyrl" ? toCyrillic(r2.text, "mixed") : r2.text;
     if (text.includes(NO_SPEECH) && text.replace(NO_SPEECH, "").trim().length < 5) {
       await editMessage(chatId, status.message_id, T.noSpeech);
       return await finish(requestId, "no_speech", { model });
@@ -346,7 +349,7 @@ async function runStep(id: number) {
   try {
     const r = await transcribe({ url: job.src.uri, mimeType: job.src.mimeType }, job.src.mimeType ?? "video/*",
       job.isVideo, Date.now() + GEMINI_BUDGET_MS, "segments", job.script, clip);
-    segs = parseSegments(r.text);
+    segs = fixSegs(parseSegments(r.text), job.script);
     if (!segs) throw new Error(`Segment JSON buzuq: ${r.text.slice(0, 200)}`);
     // Model vaqtni qism boshidan sanagan bo'lsa (00:00 dan), umumiy vaqtga o'tkazamiz.
     if (clip.start > 0 && segs.length && segs[0].start < clip.start - 30) {
@@ -604,7 +607,10 @@ async function handleSummary(cb: any, chatId: number, requestId: number) {
   try {
     const isVideo = req.media_type === "video" || req.media_type === "video_note" ||
       (req.mime_type ?? "").startsWith("video/");
-    const { text, model } = await summarize(req.transcript, Date.now() + GEMINI_BUDGET_MS, isVideo ? "video" : "audio", script);
+    const sum = await summarize(req.transcript, Date.now() + GEMINI_BUDGET_MS, isVideo ? "video" : "audio", script);
+    const { model } = sum;
+    // Annotatsiya doim o'zbekcha: kirill tanlangan bo'lsa, qochib ketgan lotin so'zlarni o'giramiz.
+    const text = script === "cyrl" ? toCyrillic(sum.text, "all") : sum.text;
     await deliver(chatId, status.message_id, req.message_id, `${TS[script].sumHeader}\n\n${text}`, undefined, "annotatsiya");
     await setSum(requestId, "done");
     console.log(`sum ${requestId}: ${text.length} belgi, ${model}`);
@@ -615,6 +621,12 @@ async function handleSummary(cb: any, chatId: number, requestId: number) {
       inlineKeyboard([{ text: TS[script].sumButton, callback_data: `sum:${requestId}` }])).catch(() => {});
     await setSum(requestId, "failed");
   }
+}
+
+/** Kirill rejimida so'z ichiga aralashib qolgan lotin harflarini tuzatadi. */
+function fixSegs(segs: Segment[] | null, script: Script): Segment[] | null {
+  if (!segs || script !== "cyrl") return segs;
+  return segs.map((x) => ({ ...x, text: toCyrillic(x.text, "mixed") }));
 }
 
 /** Foydalanuvchi tanlagan yozuv (standart: kirill). */

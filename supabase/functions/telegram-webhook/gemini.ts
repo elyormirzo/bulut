@@ -154,6 +154,7 @@ Roʻyxat qoidalari ("${w.also}"):
 
 Boshqa qoidalar:
 - Ism-familiya, lavozim va tashkilot nomlarini oʻzingdan toʻqima va tuzatma: faqat matnda aniq aytilganini yoz (${w.alphabet} yozuviga oʻgirib).
+- Javobdagi har bir oʻzbekcha soʻz faqat ${w.alphabet} harflarida boʻlsin, boshqa alifbo harflarini aralashtirma.
 - Faqat matnda bor narsani yoz, oʻzingdan qoʻshma. Matn rus yoki boshqa tilda boʻlsa ham annotatsiyani oʻzbekcha (${w.alphabet}) yoz.
 
 Matn:
